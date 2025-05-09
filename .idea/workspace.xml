@@ -4,9 +4,8 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="eeb0fedd-caba-4d79-8ea4-e2193d380858" name="Changes" comment="">
+    <list default="true" id="eeb0fedd-caba-4d79-8ea4-e2193d380858" name="Changes" comment="a">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/web1.py" beforeDir="false" afterPath="$PROJECT_DIR$/web1.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/web2.py" beforeDir="false" afterPath="$PROJECT_DIR$/web2.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -44,7 +43,7 @@
     &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;
   }
 }</component>
-  <component name="RunManager" selected="Python.web2">
+  <component name="RunManager" selected="Python.web1">
     <configuration name="t1" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
       <module name="2vs2Monitor" />
       <option name="ENV_FILES" value="" />
@@ -113,8 +112,8 @@
     </configuration>
     <recent_temporary>
       <list>
-        <item itemvalue="Python.web2" />
         <item itemvalue="Python.web1" />
+        <item itemvalue="Python.web2" />
         <item itemvalue="Python.t1" />
       </list>
     </recent_temporary>
@@ -135,6 +134,19 @@
       <option name="presentableId" value="Default" />
       <updated>1746412949757</updated>
     </task>
+    <task id="LOCAL-00001" summary="a">
+      <option name="closed" value="true" />
+      <created>1746787350347</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1746787350347</updated>
+    </task>
+    <option name="localTasksCounter" value="2" />
     <servers />
+  </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="a" />
+    <option name="LAST_COMMIT_MESSAGE" value="a" />
   </component>
 </project>

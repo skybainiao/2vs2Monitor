@@ -9,6 +9,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 from flask import Flask, jsonify
+from bs4 import BeautifulSoup
+import re
 
 app = Flask(__name__)
 
@@ -134,56 +136,91 @@ def extract_match_info(match_container, league_name, market_type):
 
         match_info = {
             'league': league_name,
-            'home_team': home_team,
-            'away_team': away_team,
             'match_time': match_time,
+            'home_team': home_team,  # 主客队名称提升到顶级字段
+            'away_team': away_team,  # 主客队名称提升到顶级字段
+            'odds': {'handicap': {}, 'total_points': {}}  # 初始化赔率结构
         }
 
-        odds = {}
         if market_type == 'HDP_OU':
-            desired_bet_types = ['Handicap', 'Goals O/U']
-            for section_class in ['hdpou_ft', 'hdpou_1h']:
-                time_indicator = 'FT' if section_class == 'hdpou_ft' else '1H'
-                ft_sections = match_container.find_all('div', class_=f'form_lebet_hdpou {section_class}')
-                for sec in ft_sections:
-                    bet_type_tag = sec.find('div', class_='head_lebet').find('span')
-                    bet_type = bet_type_tag.get_text(strip=True) if bet_type_tag else ''
-                    if bet_type in desired_bet_types:
-                        odds.update(extract_odds_hdp_ou(sec, bet_type, time_indicator))
-        match_info.update(odds)
+            ft_sections = match_container.find_all('div', class_='form_lebet_hdpou')
+            for sec in ft_sections:
+                bet_type_tag = sec.find('div', class_='head_lebet').find('span')
+                bet_type = bet_type_tag.get_text(strip=True) if bet_type_tag else ''
+                if bet_type in ['Handicap', 'Goals O/U']:
+                    # 合并不同盘口类型的赔率
+                    odds_data = extract_odds_hdp_ou(sec, bet_type)
+                    if bet_type == 'Handicap':
+                        match_info['odds']['handicap'].update(odds_data['handicap'])
+                    elif bet_type == 'Goals O/U':
+                        match_info['odds']['total_points'].update(odds_data['total_points'])
+
         return match_info
     except Exception as e:
         print(f"提取比赛信息失败: {e}")
         return None
 
 
-def extract_odds_hdp_ou(odds_section, bet_type, time_indicator):
-    odds = {}
+def extract_odds_hdp_ou(odds_section, bet_type):
+    odds = {'handicap': {}, 'total_points': {}}
+
     for col in odds_section.find_all('div', class_='col_hdpou'):
         bet_items = col.find_all('div', class_='btn_hdpou_odd')
         if len(bet_items) != 2:
             continue
-        for idx, item in enumerate(bet_items):
-            if '*' in item.get_text():
-                continue
-            handicap_tag = item.find('tt', class_='text_ballhead')
-            odds_tag = item.find('span', class_='text_odds')
-            if not handicap_tag or not odds_tag:
-                continue
-            handicap = handicap_tag.get_text(strip=True)
-            odds_val = odds_tag.get_text(strip=True)
-            is_home = idx == 0
-            team_info = item.find('tt', class_='text_ballou')
-            over_under = 'Over' if (team_info and team_info.get_text() == 'O') else 'Under' if team_info else ''
 
-            if bet_type == 'Handicap':
-                key = f"SPREAD_{time_indicator}_{handicap}_HomeOdds" if is_home else f"SPREAD_{time_indicator}_{handicap}_AwayOdds"
-            elif bet_type == 'Goals O/U':
-                key = f"TOTAL_POINTS_{time_indicator}_{handicap}_{over_under}Odds"
+        if bet_type == 'Handicap':
+            current_odds = odds['handicap']
+            for idx, item in enumerate(bet_items):
+                handicap_tag = item.find('tt', class_='text_ballhead')
+                odds_tag = item.find('span', class_='text_odds')
+                if not handicap_tag or not odds_tag:
+                    continue
 
-            if key:
-                odds[key] = odds_val
+                cleaned_handicap = clean_handicap(handicap_tag.get_text(strip=True))
+                cleaned_odds = clean_odds_value(odds_tag.get_text(strip=True))
+                if not cleaned_handicap or not cleaned_odds:
+                    continue
+
+                current_odds.setdefault(cleaned_handicap, {})
+                current_odds[cleaned_handicap]['home' if idx == 0 else 'away'] = cleaned_odds
+
+        elif bet_type == 'Goals O/U':
+            current_odds = odds['total_points']
+            for item in bet_items:
+                team_info = item.find('tt', class_='text_ballou')
+                handicap_tag = item.find('tt', class_='text_ballhead')
+                odds_tag = item.find('span', class_='text_odds')
+                if not all([team_info, handicap_tag, odds_tag]):
+                    continue
+
+                cleaned_handicap = clean_handicap(handicap_tag.get_text(strip=True))
+                cleaned_odds = clean_odds_value(odds_tag.get_text(strip=True))
+                over_under = 'over' if team_info.get_text() == 'O' else 'under'
+
+                if not cleaned_handicap or not cleaned_odds:
+                    continue
+
+                current_odds.setdefault(cleaned_handicap, {})
+                current_odds[cleaned_handicap][over_under] = cleaned_odds
+
     return odds
+
+
+def clean_odds_value(value):
+    """清洗赔率值，移除无效符号并处理特殊情况"""
+    cleaned = value.strip().strip('*')
+    if not cleaned or any(c not in '0123456789./-+' for c in cleaned):
+        return None  # 无效数据
+    return cleaned
+
+
+def clean_handicap(handicap):
+    """清洗盘口值，仅保留有效格式"""
+    cleaned = handicap.strip().strip('*')
+    if not re.match(r'^[+-]?(\d+(\.\d+)?|(\d+(\.\d+)?)/(\d+(\.\d+)?))$', cleaned):
+        return None  # 无效盘口
+    return cleaned if cleaned != '0' else '0'
 
 
 @app.route("/get_odds", methods=["GET"])
