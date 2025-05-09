@@ -3,10 +3,13 @@ import base64
 import json
 from datetime import datetime, timezone, timedelta
 from dateutil.parser import parse
+from flask import Flask, jsonify
+
+app = Flask(__name__)
 
 # 配置信息
-USERNAME = "GA1A711S00"
-PASSWORD = "dddd1111"
+USERNAME = "GA1A713S00"
+PASSWORD = "dddd1111DD"
 SPORT_ID = 29  # 足球运动 ID
 FIXTURES_API_URL = "https://api.ps3838.com/v3/fixtures"  # 赛事列表 API
 ODDS_API_URL = "https://api.ps3838.com/v3/odds"  # 赔率 API
@@ -61,17 +64,34 @@ def get_odds(event_ids):
     return None
 
 
+# 格式化时间差
+def format_time_delta(delta):
+    total_seconds = int(delta.total_seconds())
+    days, remainder = divmod(total_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+
+    if days > 0:
+        return f"{days}天{hours}小时{minutes}分"
+    elif hours > 0:
+        return f"{hours}小时{minutes}分"
+    else:
+        return f"{minutes}分{seconds}秒"
+
+
 # ------------------------------ 主逻辑 ------------------------------
-def main():
+@app.route('/get_sports_data', methods=['GET'])
+def get_sports_data():
     # 1. 获取并筛选赛事
     fixtures_data = get_fixtures()
     if not fixtures_data:
-        return
+        return jsonify({"message": "未获取到赛事列表"}), 500
 
     current_time_utc = datetime.now(timezone.utc)
     today_start_utc = current_time_utc.replace(hour=0, minute=0, second=0, microsecond=0)
     today_end_utc = current_time_utc.replace(hour=23, minute=59, second=59, microsecond=999999)
     beijing_timezone = timezone(timedelta(hours=8))
+    current_time_beijing = datetime.now(beijing_timezone)
     valid_fixtures = []
     event_ids = []  # 收集符合条件的赛事 ID
 
@@ -104,8 +124,7 @@ def main():
                 event_ids.append(event.get("id"))  # 收集赛事 ID
 
     if not valid_fixtures:
-        print("未找到符合条件的赛事")
-        return
+        return jsonify({"message": "未找到符合条件的赛事"}), 404
 
     # 2. 根据赛事 ID 获取赔率（需转换为逗号分隔字符串）
     if event_ids:
@@ -114,8 +133,8 @@ def main():
     else:
         odds_data = None
 
-    # ------------------------------ 解析并打印结果 ------------------------------
-    print(f"获取到 {len(valid_fixtures)} 场符合条件的比赛及其赔率：")
+    # 解析并打印有赔率信息的比赛结果
+    valid_fixtures_with_odds = []
     for fixture in valid_fixtures:
         event_id = fixture["event_id"]
         odds_info = {}
@@ -159,32 +178,30 @@ def main():
                                         }
                                         odds_info["totals"].append(total_info)
 
-        # 打印赛事信息
-        print(f"\n------------------------ 赛事：{fixture['league_name']} ------------------------")
-        print(f"赛事 ID：{event_id}")
-        print(f"主客队：{fixture['home_team']} vs {fixture['away_team']}")
-        print(f"开始时间（北京时间）：{fixture['start_time_beijing']}")
-
-        # 打印赔率信息（如果有）
         if odds_info:
-            print("\n赔率信息（Decimal 格式）：")
-            # 打印让球赔率
-            if "spreads" in odds_info:
-                print("让球赔率：")
-                for spread in odds_info["spreads"]:
-                    print(f"  盘口：{spread['handicap']} | 主胜：{spread['home_odds']} | 客胜：{spread['away_odds']}")
-            # 打印胜平负赔率
-            if "moneyline" in odds_info:
-                moneyline = odds_info["moneyline"]
-                print(f"胜平负：主胜 {moneyline['home']} | 平局 {moneyline['draw']} | 客胜 {moneyline['away']}")
-            # 打印总进球赔率
-            if "totals" in odds_info:
-                print("总进球赔率：")
-                for total in odds_info["totals"]:
-                    print(f"  盘口：{total['points']} | 大球：{total['over_odds']} | 小球：{total['under_odds']}")
-        else:
-            print("\n暂无该赛事的赔率信息")
+            start_time_beijing = datetime.strptime(fixture["start_time_beijing"], "%Y-%m-%d %H:%M:%S")
+            start_time_beijing = start_time_beijing.replace(tzinfo=beijing_timezone)
+            time_until_start = start_time_beijing - current_time_beijing
+            fixture["time_until_start"] = format_time_delta(time_until_start)
+            valid_fixtures_with_odds.append((fixture, odds_info))
+
+    if not valid_fixtures_with_odds:
+        return jsonify({"message": "未找到有赔率信息的符合条件赛事"}), 404
+
+    data = []
+    for fixture, odds_info in valid_fixtures_with_odds:
+        data.append({
+            "event_id": fixture["event_id"],
+            "league_name": fixture["league_name"],
+            "home_team": fixture["home_team"],
+            "away_team": fixture["away_team"],
+            "start_time_beijing": fixture["start_time_beijing"],
+            "time_until_start": fixture["time_until_start"],
+            "odds_info": odds_info
+        })
+
+    return jsonify(data)
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', debug=True)
