@@ -223,12 +223,184 @@ def clean_handicap(handicap):
     return cleaned if cleaned != '0' else '0'
 
 
+def remove_plus_signs_from_handicap(data):
+    """
+    处理赔率数据，移除盘口值中的加号(+)，但保留负号(-)和其他内容不变。
+
+    参数:
+    data (list): 包含比赛信息和赔率的列表，每个元素是一个字典
+
+    返回:
+    list: 处理后的赔率数据，盘口值中的加号被移除
+    """
+    processed_data = []
+
+    for match in data:
+        # 复制原始数据，避免修改原对象
+        processed_match = match.copy()
+        processed_odds = processed_match.get('odds', {})
+
+        # 处理让球盘(handicap)数据
+        if 'handicap' in processed_odds:
+            processed_handicap = {}
+            for handicap, odds in processed_odds['handicap'].items():
+                # 仅移除盘口值开头的加号，保留其他位置的符号
+                new_handicap = handicap.lstrip('+') if isinstance(handicap, str) else handicap
+                processed_handicap[new_handicap] = odds
+            processed_odds['handicap'] = processed_handicap
+
+        # 处理大小球(total_points)数据（如果需要的话）
+        if 'total_points' in processed_odds:
+            processed_total = {}
+            for total, odds in processed_odds['total_points'].items():
+                # 同样处理大小球盘口（如果存在加号的话）
+                new_total = total.lstrip('+') if isinstance(total, str) else total
+                processed_total[new_total] = odds
+            processed_odds['total_points'] = processed_total
+
+        processed_match['odds'] = processed_odds
+        processed_data.append(processed_match)
+
+    return processed_data
+
+
+def convert_fraction_handicap_to_decimal(data):
+    """
+    将赔率数据中的分数形式盘口值（如 `-0/0.5`）转换为小数形式（如 `-0.25`），使用预定义的替换表。
+
+    参数:
+    data (list): 包含比赛信息和赔率的列表，每个元素是一个字典
+
+    返回:
+    list: 处理后的赔率数据，分数盘口被转换为小数形式
+    """
+    # 分数形式到小数形式的完整映射表（覆盖常见盘口）
+    FRACTION_TO_DECIMAL_MAPPING = {
+        # 负向分数盘口（让分盘）
+        '-0/0.5': '-0.25',  # 平/半（主队让0.25球）
+        '-0.5/1': '-0.75',  # 半/一（主队让0.75球）
+        '-1/1.5': '-1.25',  # 一/球半（主队让1.25球）
+        '-1.5/2': '-1.75',  # 球半/两球（主队让1.75球）
+        '-2/2.5': '-2.25',  # 两球/两球半（主队让2.25球）
+        '-2.5/3': '-2.75',  # 两球半/三球（主队让2.75球）
+        '-3/3.5': '-3.25',  # 三球/三球半（主队让3.25球）
+        '-3.5/4': '-3.75',  # 三球半/四球（主队让3.75球）
+        '-4/4.5': '-4.25',  # 四球/四球半（主队让4.25球）
+        '-4.5/5': '-4.75',  # 四球半/五球（主队让4.75球）
+
+        # 正向分数盘口（受让盘，客队让球）
+        '0/0.5': '0.25',  # 平/半（客队让0.25球，即主队受让0.25球）
+        '0.5/1': '0.75',  # 半/一（客队让0.75球）
+        '1/1.5': '1.25',  # 一/球半（客队让1.25球）
+        '1.5/2': '1.75',  # 球半/两球（客队让1.75球）
+        '2/2.5': '2.25',  # 两球/两球半（客队让2.25球）
+        '2.5/3': '2.75',  # 两球半/三球（客队让2.75球）
+        '3/3.5': '3.25',  # 三球/三球半（客队让3.25球）
+        '3.5/4': '3.75',  # 三球半/四球（客队让3.75球）
+        '4/4.5': '4.25',  # 四球/四球半（客队让4.25球）
+        '4.5/5': '4.75',  # 四球半/五球（客队让4.75球）
+
+        # 特殊固定值（无需转换，直接映射以确保兼容性）
+        '0': '0',  # 平手盘
+        '0.5': '0.5',  # 半球盘
+        '1': '1',  # 一球盘
+        '1.5': '1.5',  # 球半盘
+        '2': '2',  # 两球盘
+        '2.5': '2.5',  # 两球半盘
+        '3': '3',  # 三球盘
+        '3.5': '3.5',  # 三球半盘
+        '4': '4',  # 四球盘
+        '4.5': '4.5',  # 四球半盘
+        '5': '5',  # 五球盘
+        '-0.5': '-0.5',  # 受让半球（客队让0.5球）
+        '-1': '-1',  # 受让一球（客队让1球）
+        '-1.5': '-1.5',  # 受让球半（客队让1.5球）
+        '-2': '-2',  # 受让两球（客队让2球）
+        '-2.5': '-2.5',  # 受让两球半（客队让2.5球）
+        '-3': '-3',  # 受让三球（客队让3球）
+        '-3.5': '-3.5',  # 受让三球半（客队让3.5球）
+        '-4': '-4',  # 受让四球（客队让4球）
+        '-4.5': '-4.5',  # 受让四球半（客队让4.5球）
+        '-5': '-5',  # 受让五球（客队让5球）
+    }
+
+    processed_data = []
+
+    for match in data:
+        processed_match = match.copy()
+        processed_odds = processed_match.get('odds', {})
+
+        # 处理让球盘(handicap)
+        if 'handicap' in processed_odds:
+            processed_handicap = {}
+            for handicap, odds in processed_odds['handicap'].items():
+                # 从映射表获取对应的小数值，不存在则保留原值
+                new_handicap = FRACTION_TO_DECIMAL_MAPPING.get(handicap, handicap)
+                processed_handicap[new_handicap] = odds
+            processed_odds['handicap'] = processed_handicap
+
+        # 处理大小球(total_points，逻辑相同，因大小球盘口可能包含分数形式，如1.5/2需转换为1.75）
+        if 'total_points' in processed_odds:
+            processed_total = {}
+            for total, odds in processed_odds['total_points'].items():
+                new_total = FRACTION_TO_DECIMAL_MAPPING.get(total, total)
+                processed_total[new_total] = odds
+            processed_odds['total_points'] = processed_total
+
+        processed_match['odds'] = processed_odds
+        processed_data.append(processed_match)
+
+    return processed_data
+
+
+def rename_fields(data):
+    """
+    重命名赔率数据中的特定字段名称，保持数据结构和内容不变。
+
+    参数:
+    data (list): 包含比赛信息和赔率的列表
+
+    返回:
+    list: 处理后的赔率数据，字段名已修改
+    """
+    processed_data = []
+
+    for match in data:
+        # 复制原始数据，避免修改原对象
+        processed_match = match.copy()
+
+        # 重命名 league 为 league_name
+        if 'league' in processed_match:
+            processed_match['league_name'] = processed_match.pop('league')
+
+        # 处理赔率数据
+        if 'odds' in processed_match:
+            processed_odds = processed_match['odds'].copy()
+
+            # 重命名 handicap 为 spreads
+            if 'handicap' in processed_odds:
+                processed_odds['spreads'] = processed_odds.pop('handicap')
+
+            # 重命名 total_points 为 totals
+            if 'total_points' in processed_odds:
+                processed_odds['totals'] = processed_odds.pop('total_points')
+
+            processed_match['odds'] = processed_odds
+
+        processed_data.append(processed_match)
+
+    return processed_data
+
 @app.route("/get_odds", methods=["GET"])
 def get_odds():
     soup = get_market_data(driver)
     if soup:
         data_list = parse_market_data(soup, 'HDP_OU')
-        return jsonify(data_list)
+        # 应用盘口值处理，移除加号
+        data_list = remove_plus_signs_from_handicap(data_list)
+        processed_data = convert_fraction_handicap_to_decimal(data_list)
+        processed_data = rename_fields(processed_data)
+        return jsonify(processed_data)
     else:
         return jsonify({"error": "未获取到数据"}), 500
 
