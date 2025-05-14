@@ -1,6 +1,8 @@
 import json
 import threading
 import time
+
+import requests
 from selenium import webdriver
 from selenium.common import TimeoutException
 from selenium.webdriver.common.by import By
@@ -391,16 +393,57 @@ def rename_fields(data):
 
     return processed_data
 
-@app.route("/get_odds", methods=["GET"])
+@app.route("/get_odds2", methods=["GET"])
 def get_odds():
     soup = get_market_data(driver)
     if soup:
         data_list = parse_market_data(soup, 'HDP_OU')
-        # 应用盘口值处理，移除加号
         data_list = remove_plus_signs_from_handicap(data_list)
         processed_data = convert_fraction_handicap_to_decimal(data_list)
-        processed_data = rename_fields(processed_data)
-        return jsonify(processed_data)
+        processed_data = rename_fields(processed_data)  # 此时数据格式与1网一致
+
+        # ===================== 新增：Java数据验证逻辑 =====================
+        # 1. 整理待验证的赛事数据（转换为Java接口需要的格式）
+        matches_to_check = []
+        for match in processed_data:
+            matches_to_check.append({
+                "league": match["league_name"],
+                "homeTeam": match["home_team"],
+                "awayTeam": match["away_team"]
+            })
+
+        # 2. 发送验证请求（2网固定source=2）
+        JAVA_CHECK_API = "http://160.25.20.18:8080/api/bindings/check-existing"  # 假设Java接口地址不变
+        payload = {
+            "source": 2,  # 2网对应source2
+            "matches": matches_to_check
+        }
+
+        try:
+            response = requests.post(JAVA_CHECK_API, json=payload, timeout=10)
+            response.raise_for_status()
+            result = response.json()
+            existing_leagues = result.get("leagues", [])
+            existing_teams = result.get("teams", [])
+        except Exception as e:
+            print(f"Java验证接口调用失败: {e}")
+            return jsonify({"error": "数据验证失败"}), 500
+
+        # 3. 过滤出数据库中存在的赛事
+        valid_data = []
+        for match in processed_data:
+            league = match["league_name"]
+            home_team = match["home_team"]
+            away_team = match["away_team"]
+            # 必须同时存在联赛和主客队（与1网逻辑一致）
+            if league in existing_leagues and home_team in existing_teams and away_team in existing_teams:
+                valid_data.append(match)
+
+        if not valid_data:
+            return jsonify({"message": "未找到数据库中存在的赛事"}), 404
+
+        return jsonify(valid_data)  # 返回验证后的有效数据
+        # ===================== 原有代码删除，替换为上述逻辑 =====================
     else:
         return jsonify({"error": "未获取到数据"}), 500
 
@@ -525,7 +568,7 @@ if __name__ == "__main__":
     start_popup_monitor(driver)
 
     # 运行Flask服务
-    app.run(host="0.0.0.0", port=5001, debug=False)
+    app.run(host="0.0.0.0", port=5002, debug=False)
 
     # 程序结束时关闭浏览器（实际中可能需要添加关闭逻辑）
     driver.quit()

@@ -177,7 +177,7 @@ def reformat_odds_data(original_odds):
 
 
 # ------------------------------ 主逻辑 ------------------------------
-@app.route('/get_sports_data', methods=['GET'])
+@app.route('/get_odds1', methods=['GET'])
 def get_sports_data():
     # 1. 获取并筛选赛事
     fixtures_data = get_fixtures()
@@ -345,4 +345,4 @@ def get_sports_data():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5001, debug=True)
