@@ -113,7 +113,6 @@ def batch_fetch_bindings(league_names: List[str]) -> Dict[str, List[Dict[str, An
 
     try:
         with conn.cursor(cursor_factory=DictCursor) as cursor:
-            # 使用参数化查询防止SQL注入
             query = """
             SELECT * FROM bindings 
             WHERE source3_league = ANY(%s)
@@ -144,21 +143,21 @@ def batch_fetch_bindings(league_names: List[str]) -> Dict[str, List[Dict[str, An
 
 
 def create_team_mapping_cache(bindings: List[Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
-    """创建球队映射缓存，加速查找"""
+    """创建球队映射缓存，仅包含source1和source2均有值的记录"""
     mapping_cache = {}
-
     for binding in bindings:
-        # 处理主队映射
         home_team = binding['source3_home_team']
-        if home_team not in mapping_cache:
+        away_team = binding['source3_away_team']
+
+        # 主队必须同时有source1和source2的映射
+        if binding['source1_home_team'] and binding['source2_home_team']:
             mapping_cache[home_team] = {
                 "source1": binding['source1_home_team'],
                 "source2": binding['source2_home_team']
             }
 
-        # 处理客队映射
-        away_team = binding['source3_away_team']
-        if away_team not in mapping_cache:
+        # 客队必须同时有source1和source2的映射
+        if binding['source1_away_team'] and binding['source2_away_team']:
             mapping_cache[away_team] = {
                 "source1": binding['source1_away_team'],
                 "source2": binding['source2_away_team']
@@ -175,20 +174,16 @@ def create_api_index(api_data: List[Dict[str, Any]]) -> Dict[Tuple[str, str, str
 async def process_league(league_name: str, matches: List[Dict[str, Any]],
                          all_api_indexes: Dict[int, Dict[Tuple[str, str, str], Dict[str, Any]]],
                          league_bindings: List[Dict[str, Any]]):
-    """处理单个联赛的所有比赛，带详细调试日志"""
+    """处理单个联赛的比赛，必须同时匹配source1、source2、source3才视为成功"""
     if not league_bindings:
-        print(f"❌ 联赛 {league_name} 未找到匹配的bindings记录")
+        print(f"❌ 联赛 {league_name} 未找到匹配的bindings记录，跳过所有比赛")
         return []
 
-    # 创建球队映射缓存
+    # 创建球队映射缓存（要求source1和source2同时存在）
     team_mapping_cache = create_team_mapping_cache(league_bindings)
-
-    # 验证bindings中source1是否存在空值
-    for binding in league_bindings:
-        if not binding["source1_home_team"] or not binding["source1_away_team"]:
-            print(f"⚠️ 数据库记录不完整: {binding['source3_league']} - {binding['source3_home_team']} vs {binding['source3_away_team']}")
-            print(f"  - source1_home_team: {binding['source1_home_team']}")
-            print(f"  - source1_away_team: {binding['source1_away_team']}")
+    if not team_mapping_cache:
+        print(f"⚠️ 联赛 {league_name} 中所有球队均无完整绑定，跳过所有比赛")
+        return []
 
     league_info = {
         "source1": league_bindings[0]["source1_league"],
@@ -197,61 +192,47 @@ async def process_league(league_name: str, matches: List[Dict[str, Any]],
     }
 
     results = []
+    required_sources = {1, 2, 3}  # 必须同时匹配这三个数据源
 
     for match in matches:
         home_team = match["home_team"]
         away_team = match["away_team"]
 
-        home_team_mapping = team_mapping_cache.get(home_team, {"source1": None, "source2": None})
-        away_team_mapping = team_mapping_cache.get(away_team, {"source1": None, "source2": None})
-
-        # 检查source1映射是否为空
-        if not home_team_mapping["source1"] or not away_team_mapping["source1"]:
-            print(f"❌ 比赛 {home_team} vs {away_team} 的source1映射为空")
-            print(f"  - 主队映射: {home_team_mapping}")
-            print(f"  - 客队映射: {away_team_mapping}")
+        # 检查数据库绑定是否完整（source1和source2必须同时存在）
+        if home_team not in team_mapping_cache or away_team not in team_mapping_cache:
+            print(f"❌ 比赛 {home_team} vs {away_team} 缺少数据库绑定，作废")
             continue
 
-        team_mapping = {
-            "home": {
-                "source1": home_team_mapping["source1"],
-                "source2": home_team_mapping["source2"],
-                "source3": home_team
-            },
-            "away": {
-                "source1": away_team_mapping["source1"],
-                "source2": away_team_mapping["source2"],
-                "source3": away_team
-            },
-            "league": league_info
-        }
-
+        home_mapping = team_mapping_cache[home_team]
+        away_mapping = team_mapping_cache[away_team]
         matched_apis = {}
-        for source_index in [1, 2, 3]:
-            if source_index not in all_api_indexes:
-                print(f"❌ 数据源{source_index}索引未创建")
-                continue
+        missing_sources = set(required_sources)  # 记录未匹配的数据源
 
-            # 生成数据库中的查询键
-            db_key = (
-                team_mapping["league"][f"source{source_index}"],
-                team_mapping["home"][f"source{source_index}"],
-                team_mapping["away"][f"source{source_index}"]
-            )
-
-            # 获取API中的实际键（前3个示例）
-            api_keys_sample = list(all_api_indexes[source_index].keys())[:3]
-
-            # 检查API中是否存在该键
-            if db_key not in all_api_indexes[source_index]:
-                print(f"❌ 数据源{source_index}中未找到键: {db_key}")
-                print(f"  - 数据源{source_index}示例键: {api_keys_sample}")
+        # 逐一匹配每个数据源
+        for source_index in required_sources:
+            if source_index == 3:
+                # source3直接使用原始比赛信息（无需绑定，依赖API存在该比赛）
+                db_key = (league_info["source3"], home_team, away_team)
             else:
-                matched_apis[source_index] = all_api_indexes[source_index][db_key]
-                print(f"✅ 数据源{source_index}匹配成功: {db_key}")
+                # source1/source2使用数据库绑定的名称
+                league_key = league_info[f"source{source_index}"]
+                home_key = home_mapping[f"source{source_index}"]
+                away_key = away_mapping[f"source{source_index}"]
+                db_key = (league_key, home_key, away_key)
 
-        if matched_apis:
-            results.append((match, team_mapping, matched_apis))
+            api_index = all_api_indexes.get(source_index, {})
+            if db_key in api_index:
+                matched_apis[source_index] = api_index[db_key]
+                missing_sources.discard(source_index)  # 从缺失集合中移除已匹配的数据源
+            else:
+                print(f"❌ 数据源{source_index}未匹配: {db_key}")
+
+        # 检查是否所有数据源均匹配
+        if missing_sources:
+            print(f"❌ 比赛 {home_team} vs {away_team} 缺少数据源: {missing_sources}，作废")
+        else:
+            results.append((match, {"home": home_mapping, "away": away_mapping, "league": league_info}, matched_apis))
+            print(f"✅ 比赛 {home_team} vs {away_team} 全数据源匹配成功")
 
     return results
 
@@ -281,9 +262,12 @@ async def process_api_data(results: List[Dict[str, Any]]):
         return
 
     source3_data = source3_result["data"]
+    total_matches_source3 = len(source3_data)
+    print(f"\n📊 接口3数据统计:")
+    print(f"  - 总比赛数: {total_matches_source3}")
 
     print("\n" + "=" * 50)
-    print("🔍 开始交叉匹配数据")
+    print("🔍 开始交叉匹配数据（仅处理数据库绑定完整的比赛）")
     print("=" * 50)
 
     # 按联赛分组处理比赛
@@ -291,14 +275,14 @@ async def process_api_data(results: List[Dict[str, Any]]):
     for match in source3_data:
         league_groups[match["league_name"]].append(match)
 
-    print(f"📊 共发现 {len(league_groups)} 个不同联赛，{len(source3_data)} 场比赛")
+    print(f"📊 共发现 {len(league_groups)} 个不同联赛，{total_matches_source3} 场比赛")
 
     # 批量获取所有联赛的bindings数据
     print("📡 开始批量查询数据库中的联赛绑定数据...")
     league_bindings_map = batch_fetch_bindings(list(league_groups.keys()))
     print(f"✅ 已获取 {len(league_bindings_map)} 个联赛的绑定数据")
 
-    # 并行处理每个联赛
+    # 并行处理每个联赛（仅包含绑定完整的比赛）
     print("\n🚀 开始并行处理联赛...")
     tasks = []
     for league_name, matches in league_groups.items():
@@ -309,43 +293,29 @@ async def process_api_data(results: List[Dict[str, Any]]):
             league_bindings_map.get(league_name, [])
         ))
 
-    # 等待所有联赛处理完成
     league_results = await asyncio.gather(*tasks)
 
-    # 合并结果并输出
-    print("\n" + "=" * 50)
-    print(f"📊 处理结果汇总 - 共处理 {len(league_groups)} 个联赛")
-    print("=" * 50)
-
-    total_matches = 0
-    total_matched = 0
-
-    for results in league_results:
-        for match, team_mapping, matched_apis in results:
-            total_matches += 1
-            total_matched += len(matched_apis)
-
-            # 打印组合后的比赛数据
-            print("\n" + "-" * 30)
-            print(f"📊 匹配的完整比赛数据 ({len(matched_apis)}个数据源)")
-            print(f"🎯 原始比赛: {match['home_team']} vs {match['away_team']}")
-            print("-" * 30)
-
-            for source_index, api_match in sorted(matched_apis.items()):
-                print(f"\n🏆 比赛数据 (数据源{source_index})")
-                print(f"联赛: {api_match['league_name']}")
-                print(f"主队: {api_match['home_team']}")
-                print(f"客队: {api_match['away_team']}")
-                print(f"时间: {api_match.get('time', 'N/A')}")
-                print("赔率:")
-                print(json.dumps(api_match.get('odds', {}), indent=2, ensure_ascii=False))
+    # 合并所有匹配成功的比赛
+    all_matched_matches = [match for league_result in league_results for match in league_result]
+    total_matched = len(all_matched_matches)
 
     print("\n" + "=" * 50)
-    print(f"📊 最终统计:")
-    print(f"  - 总比赛数: {total_matches}")
-    print(f"  - 匹配成功数: {total_matched}")
-    print(f"  - 平均每个比赛匹配数据源: {total_matched / total_matches:.2f}")
+    print(f"📊 最终匹配统计")
     print("=" * 50)
+    print(f"  - 接口3总比赛数: {total_matches_source3}")
+    print(f"  - 数据库绑定完整的比赛数: {sum(len(matches) for matches in league_groups.values())}")
+    print(f"  - 匹配成功的比赛数: {total_matched}")
+    print(f"  - 匹配成功率: {total_matched / total_matches_source3 * 100:.2f}% (基于接口3总比赛数)")
+    print(f"  - 绑定后匹配成功率: {total_matched / (sum(len(matches) for matches in league_groups.values()) or 1) * 100:.2f}% (基于绑定成功的比赛数)")
+
+    # 打印匹配成功的比赛详情（可选保留）
+    for match, team_mapping, matched_apis in all_matched_matches:
+        print("\n" + "-" * 30)
+        print(f"🎯 绑定成功并匹配的比赛: {match['home_team']} vs {match['away_team']}")
+        for source_index, api_match in sorted(matched_apis.items()):
+            print(f"\n🏆 数据源{source_index}数据")
+            print(f"联赛: {api_match['league_name']}")
+            print(f"赔率: {json.dumps(api_match.get('odds', {}), indent=2)}")
 
 
 @timed
@@ -355,58 +325,21 @@ async def main():
     print(f"🚀 开始并发API数据获取流程 - {datetime.now().isoformat()}")
     print("=" * 50)
 
-    # 创建会话
-    print("🔄 创建HTTP会话...")
     async with aiohttp.ClientSession() as session:
-        print("📡 准备并发请求以下API:")
-        for url in API_URLS:
-            print(f"  - {url}")
-
-        print("\n🚨 开始并发请求 (这将同时发送所有请求)...")
-        start_time = datetime.now()
-
-        # 创建并执行所有请求任务
         tasks = [fetch_api(session, url) for url in API_URLS]
         results = await asyncio.gather(*tasks)
 
-        total_time = (datetime.now() - start_time).total_seconds() * 1000  # 毫秒
-        print(f"\n🎉 所有API请求已完成 (总耗时: {total_time:.2f}ms)")
-
-        # 计算成功和失败的请求数
-        success_count = sum(1 for r in results if r["status"] == "success")
-        error_count = len(results) - success_count
-
-        print(f"\n📊 请求统计:")
-        print(f"  ✅ 成功: {success_count}")
-        print(f"  ❌ 失败: {error_count}")
-
-        # 格式化输出每个API的结果
         print("\n" + "=" * 50)
-        print(f"API数据获取结果详情 - {datetime.now().isoformat()}")
+        print(f"API请求状态汇总")
         print("=" * 50)
-
         for result in results:
-            print(f"\nURL: {result['url']}")
-            print(f"状态: {'✅成功' if result['status'] == 'success' else '❌失败'}")
-            print(f"响应时间: {result['response_time']:.2f}ms")
+            status_icon = "✅" if result["status"] == "success" else "❌"
+            print(f"{status_icon} {result['url']}")
 
-            if result['status'] == 'success':
-                # 美化JSON输出
-                print("数据:")
-                try:
-                    print(json.dumps(result['data'], indent=2, ensure_ascii=False)[:1000])  # 限制最大长度
-                except (TypeError, json.JSONDecodeError):
-                    print(f"[非JSON数据] {str(result['data'])[:1000]}")
-            else:
-                error_info = result.get('status_code', result.get('error_message', '未知错误'))
-                print(f"错误信息: {error_info}")
-
-        # 处理API数据并与数据库数据交叉匹配
         await process_api_data(results)
 
 
 if __name__ == "__main__":
-    # 解决Windows系统下的事件循环问题
     if hasattr(asyncio, 'WindowsSelectorEventLoopPolicy'):
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
