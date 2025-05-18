@@ -239,8 +239,8 @@ async def process_league(league_name: str, matches: List[Dict[str, Any]],
 
 @timed
 async def process_api_data(results: List[Dict[str, Any]]):
-    """处理API数据并与数据库数据交叉匹配"""
-    # 提取所有API数据并创建索引
+    """Process API data and cross-match with database data"""
+    # Extract all API data and create indexes
     all_api_data = {}
     all_api_indexes = {}
 
@@ -249,41 +249,41 @@ async def process_api_data(results: List[Dict[str, Any]]):
         if result["status"] == "success":
             all_api_data[i] = result["data"]
             all_api_indexes[i] = create_api_index(result["data"])
-            print(f"🔍 已为数据源{i}创建索引，包含 {len(result['data'])} 场比赛")
+            print(f"🔍 Index created for data source {i}, containing {len(result['data'])} matches")
         else:
             all_api_data[i] = []
             all_api_indexes[i] = {}
-            print(f"❌ 无法为数据源{i}创建索引，API请求失败")
+            print(f"❌ Failed to create index for data source {i}, API request failed")
 
-    # 获取source3数据
+    # Get source3 data
     source3_result = next((r for r in results if r["url"] == API_URLS[2]), None)
     if not source3_result or source3_result["status"] != "success":
-        print("❌ 无法获取source3数据")
+        print("❌ Failed to get source3 data")
         return
 
     source3_data = source3_result["data"]
     total_matches_source3 = len(source3_data)
-    print(f"\n📊 接口3数据统计:")
-    print(f"  - 总比赛数: {total_matches_source3}")
+    print(f"\n📊 Source3 Data Statistics:")
+    print(f"  - Total Matches: {total_matches_source3}")
 
     print("\n" + "=" * 50)
-    print("🔍 开始交叉匹配数据（仅处理数据库绑定完整的比赛）")
+    print("🔍 Starting Cross-Matching Process (Processing only fully bound matches)")
     print("=" * 50)
 
-    # 按联赛分组处理比赛
+    # Group matches by league
     league_groups = defaultdict(list)
     for match in source3_data:
         league_groups[match["league_name"]].append(match)
 
-    print(f"📊 共发现 {len(league_groups)} 个不同联赛，{total_matches_source3} 场比赛")
+    print(f"📊 Found {len(league_groups)} different leagues with {total_matches_source3} matches")
 
-    # 批量获取所有联赛的bindings数据
-    print("📡 开始批量查询数据库中的联赛绑定数据...")
+    # Batch fetch league bindings from database
+    print("📡 Fetching league bindings from database...")
     league_bindings_map = batch_fetch_bindings(list(league_groups.keys()))
-    print(f"✅ 已获取 {len(league_bindings_map)} 个联赛的绑定数据")
+    print(f"✅ Successfully retrieved bindings for {len(league_bindings_map)} leagues")
 
-    # 并行处理每个联赛（仅包含绑定完整的比赛）
-    print("\n🚀 开始并行处理联赛...")
+    # Process each league in parallel
+    print("\n🚀 Starting parallel league processing...")
     tasks = []
     for league_name, matches in league_groups.items():
         tasks.append(process_league(
@@ -295,27 +295,49 @@ async def process_api_data(results: List[Dict[str, Any]]):
 
     league_results = await asyncio.gather(*tasks)
 
-    # 合并所有匹配成功的比赛
+    # Combine all successfully matched matches
     all_matched_matches = [match for league_result in league_results for match in league_result]
     total_matched = len(all_matched_matches)
 
     print("\n" + "=" * 50)
-    print(f"📊 最终匹配统计")
+    print(f"📊 Final Matching Statistics")
     print("=" * 50)
-    print(f"  - 接口3总比赛数: {total_matches_source3}")
-    print(f"  - 数据库绑定完整的比赛数: {sum(len(matches) for matches in league_groups.values())}")
-    print(f"  - 匹配成功的比赛数: {total_matched}")
-    print(f"  - 匹配成功率: {total_matched / total_matches_source3 * 100:.2f}% (基于接口3总比赛数)")
-    print(f"  - 绑定后匹配成功率: {total_matched / (sum(len(matches) for matches in league_groups.values()) or 1) * 100:.2f}% (基于绑定成功的比赛数)")
+    print(f"  - Total Source3 Matches: {total_matched}")
+    print(f"  - Matches with Complete Database Bindings: {sum(len(matches) for matches in league_groups.values())}")
+    print(f"  - Successfully Matched Matches: {total_matched}")
+    print(
+        f"  - Matching Success Rate: {total_matched / total_matches_source3 * 100:.2f}% (Based on Source3 total matches)")
+    print(
+        f"  - Post-Binding Success Rate: {total_matched / (sum(len(matches) for matches in league_groups.values()) or 1) * 100:.2f}% (Based on successfully bound matches)")
 
-    # 打印匹配成功的比赛详情（可选保留）
+    # Print detailed information for matched matches
     for match, team_mapping, matched_apis in all_matched_matches:
         print("\n" + "-" * 30)
-        print(f"🎯 绑定成功并匹配的比赛: {match['home_team']} vs {match['away_team']}")
+        print(f"🎯 Successfully Bound and Matched Match: {match['home_team']} vs {match['away_team']}")
+
+        # Print original names from source3
+        print(f"\n📌 Original Names (Source3):")
+        print(f"  Home Team: {match['home_team']}")
+        print(f"  Away Team: {match['away_team']}")
+
         for source_index, api_match in sorted(matched_apis.items()):
-            print(f"\n🏆 数据源{source_index}数据")
-            print(f"联赛: {api_match['league_name']}")
-            print(f"赔率: {json.dumps(api_match.get('odds', {}), indent=2)}")
+            print(f"\n🏆 Data from Source {source_index}")
+            print(f"League: {api_match['league_name']}")
+
+            # Print source-specific team names
+            if source_index == 3:
+                # Use original names from source3
+                print(f"Home Team: {api_match['home_team']}")
+                print(f"Away Team: {api_match['away_team']}")
+            else:
+                # Use mapped names from database bindings
+                source_key = f"source{source_index}"
+                home_mapping = team_mapping["home"][source_key]
+                away_mapping = team_mapping["away"][source_key]
+                print(f"Home Team: {home_mapping}")
+                print(f"Away Team: {away_mapping}")
+
+            print(f"Odds: {json.dumps(api_match.get('odds', {}), indent=2)}")
 
 
 @timed
