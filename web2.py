@@ -517,7 +517,7 @@ def handle_any_popup(driver):
                     acc = ACCOUNTS[0]
                     driver.get(BASE_URL)
                     login(driver, acc['username'], acc['password'])
-
+                    navigate_to_football(driver)
                 return  # 处理一个弹窗后立即返回
             except:
                 continue  # 继续检查下一个弹窗类型

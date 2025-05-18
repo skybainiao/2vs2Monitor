@@ -1,6 +1,6 @@
 from flask import Flask, jsonify
 import requests
-from datetime import datetime  # 新增：可能用于时间处理（如果需要）
+from datetime import datetime
 
 app = Flask(__name__)
 
@@ -94,6 +94,22 @@ def simplify_to_required_structure(markets):
     return simplified
 
 
+def format_handicap(handicap_str):
+    """优化盘口格式显示，移除不必要的小数点零"""
+    try:
+        # 尝试将字符串转换为浮点数
+        handicap_num = float(handicap_str)
+        # 检查是否为整数
+        if handicap_num.is_integer():
+            # 转换为整数并转回字符串
+            return str(int(handicap_num))
+        # 否则保持原字符串
+        return handicap_str
+    except (ValueError, TypeError):
+        # 转换失败时保持原字符串
+        return handicap_str
+
+
 @app.route('/get_odds3', methods=['GET'])
 def api_get_soccer_events():
     try:
@@ -159,12 +175,26 @@ def api_get_soccer_events():
                         event.get('odds', []) or event.get('markets', [])
                     )
 
+                    # 优化盘口格式显示
+                    formatted_odds = {
+                        "spreads": {
+                            format_handicap(handicap): {
+                                side: value for side, value in selections.items()
+                            } for handicap, selections in odds["spreads"].items()
+                        },
+                        "totals": {
+                            format_handicap(handicap): {
+                                side: value for side, value in selections.items()
+                            } for handicap, selections in odds["totals"].items()
+                        }
+                    }
+
                     filtered_matches.append({
                         "league_name": league_name,
                         "home_team": home_team,
                         "away_team": away_team,
                         "time": time_format,
-                        "odds": odds
+                        "odds": formatted_odds
                     })
 
         return jsonify(filtered_matches)
