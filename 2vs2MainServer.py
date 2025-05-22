@@ -10,6 +10,11 @@ import functools
 import time
 from collections import defaultdict, ChainMap
 from hashlib import md5  # 用于数据哈希对比
+# 导入WebSocket库
+import websockets
+
+
+
 
 # === 配置区 ===
 # API配置
@@ -49,6 +54,18 @@ API_FAILURE_DELAY = 60  # 失效后暂停时间（秒）
 postgres_pool = None  # 数据库连接池
 last_matches_data = {}  # 上次的比赛数据缓存 {match_name: (hash, data)}
 
+# === 新增：全局比赛数据缓存 ===
+all_matches_cache = {}  # 所有比赛的最新数据缓存 {match_name: data}
+
+
+# === 新增：WebSocket相关配置 ===
+WS_CONFIG = {
+    "host": "160.25.20.18",
+    "port": 8765
+}
+
+# 存储所有连接的客户端
+connected_clients = set()
 
 # === 装饰器 ===
 def timed(func):
@@ -656,6 +673,7 @@ def compare_odds(old_data: Dict, new_data: Dict) -> List[Dict]:
 
     return changes
 
+
 # === 新增：检查API响应是否有失败 ===
 def check_api_failures(results: List[Dict[str, Any]]) -> bool:
     """检查API请求结果中是否有失败的情况"""
@@ -666,11 +684,68 @@ def check_api_failures(results: List[Dict[str, Any]]) -> bool:
     return False
 
 
+# === 新增：维护全局比赛数据缓存 ===
+def update_matches_cache(matches_data: Dict):
+    """更新全局比赛数据缓存"""
+    global all_matches_cache
+
+    # 先清除已不存在的比赛
+    current_matches = set(matches_data.keys())
+    old_matches = set(all_matches_cache.keys())
+    removed_matches = old_matches - current_matches
+
+    for match_name in removed_matches:
+        del all_matches_cache[match_name]
+
+    # 更新或添加比赛数据
+    for match_name, data in matches_data.items():
+        # 添加更新时间戳
+        data_with_timestamp = {
+            **data,
+            "last_updated": datetime.now().isoformat()
+        }
+        all_matches_cache[match_name] = data_with_timestamp
+
+    print(f"✅ 比赛数据缓存已更新，当前缓存大小: {len(all_matches_cache)}")
+
+
+# === 新增：WebSocket广播函数（修改为非阻塞）===
+async def broadcast_matches_data():
+    """定期广播最新比赛数据给所有连接的客户端"""
+    while True:
+        try:
+            if connected_clients and all_matches_cache:
+                data_to_send = {
+                    "timestamp": datetime.now().isoformat(),
+                    "matches": list(all_matches_cache.values())
+                }
+                await asyncio.gather(
+                    *[client.send(json.dumps(data_to_send)) for client in connected_clients]
+                )
+        except Exception as e:
+            print(f"❌ WebSocket广播失败: {e}")
+        await asyncio.sleep(5)  # 每5秒广播一次
+
+
+async def ws_handler(websocket, path):
+    """处理WebSocket连接"""
+    # 添加客户端到连接集合
+    connected_clients.add(websocket)
+    print(f"✅ 新的WebSocket连接，当前连接数: {len(connected_clients)}")
+
+    try:
+        # 保持连接打开
+        await websocket.wait_closed()
+    finally:
+        # 连接关闭时移除客户端
+        connected_clients.remove(websocket)
+        print(f"ℹ️ WebSocket连接已关闭，当前连接数: {len(connected_clients)}")
 # === 主函数 ===
 @timed
 async def main():
-    """主函数：周期性获取所有API数据并打印变化部分"""
+    """主函数：周期性获取所有API数据并通过WebSocket推送更新"""
     global postgres_pool, last_matches_data
+
     # 初始化数据库连接池和表
     if not init_db_pool() or not init_db_tables():
         print("❌ 数据库初始化失败，程序退出")
@@ -679,16 +754,19 @@ async def main():
     try:
         print(f"\n{'=' * 20} 程序启动，获取初始数据 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {'=' * 20}")
 
-        # 首次运行时获取数据并保存初始状态到数据库
+        # === WebSocket 服务启动 ===
+        ws_server = await websockets.serve(ws_handler, WS_CONFIG["host"], WS_CONFIG["port"])
+        print(f"✅ WebSocket服务已启动: ws://{WS_CONFIG['host']}:{WS_CONFIG['port']}")
+
+        # 首次数据获取与初始化
         async with aiohttp.ClientSession() as session:
             tasks = [fetch_api(session, url) for url in API_URLS]
             results = await asyncio.gather(*tasks)
 
-            # 检查API是否有失效情况
             if check_api_failures(results):
                 print(f"⚠️ 程序将暂停 {API_FAILURE_DELAY} 秒后继续运行...")
                 await asyncio.sleep(API_FAILURE_DELAY)
-                return  # 启动时遇到API失效则退出程序，避免空数据入库
+                return
 
             all_matches_data = await process_api_data(results)
 
@@ -697,175 +775,231 @@ async def main():
             print(f"📥 初始化：保存初始比赛数据到数据库")
             print("=" * 50)
 
-            # 遍历所有比赛并保存初始数据
             for match_name, match_data in all_matches_data.items():
-                # 保存比赛信息到数据库
                 match_id = save_match_info(match_name, match_data)
-
                 if match_id:
-                    # 构建模拟的"变化"数据（将所有当前赔率作为"新变化"）
                     dummy_changes = []
-
-                    # 提取所有赔率数据并转换为"变化"格式
                     for source in match_data.get("sources", []):
                         source_id = source.get("source")
-                        odds = source.get("odds", {})
-
-                        # 处理让分盘
-                        for spread_key, spread_data in odds.get("spreads", {}).items():
+                        for spread_key, spread_data in source.get("odds", {}).get("spreads", {}).items():
                             for side, value in spread_data.items():
                                 dummy_changes.append({
                                     "type": "spread",
                                     "source": source_id,
                                     "spread": spread_key,
                                     "side": side,
-                                    "old_value": None,  # 初始值，无旧数据
+                                    "old_value": None,
                                     "new_value": value
                                 })
-
-                        # 处理大小球
-                        for total_key, total_data in odds.get("totals", {}).items():
+                        for total_key, total_data in source.get("odds", {}).get("totals", {}).items():
                             for side, value in total_data.items():
                                 dummy_changes.append({
                                     "type": "total",
                                     "source": source_id,
                                     "total": total_key,
                                     "side": side,
-                                    "old_value": None,  # 初始值，无旧数据
+                                    "old_value": None,
                                     "new_value": value
                                 })
-
-                    # 保存"变化"到数据库（实际是初始数据）
                     if dummy_changes:
                         save_odds_changes(match_id, match_name, dummy_changes)
                         print(f"✅ 已保存初始数据: {match_name} ({len(dummy_changes)} 条赔率记录)")
 
-            # 计算并缓存初始数据的哈希值
             for match_name, match_data in all_matches_data.items():
-                current_hash = calculate_odds_hash(match_data)
                 cache_key = (match_name, match_data["start_time_beijing"])
-                last_matches_data[cache_key] = (current_hash, match_data)
+                last_matches_data[cache_key] = (calculate_odds_hash(match_data), match_data)
+
+            update_matches_cache(all_matches_data)
+
+            # 将广播函数作为独立任务运行，不阻塞主循环
+            broadcast_task = asyncio.create_task(broadcast_matches_data())
 
             print(f"\n✅ 初始数据保存完成，共 {len(all_matches_data)} 场比赛")
-
         else:
             print("ℹ️ 初始数据为空，程序将继续运行但无数据可保存")
 
-        # 进入常规数据获取循环
+        # 主循环：周期性数据处理
         print(f"\n{'=' * 20} 开始周期性数据获取 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {'=' * 20}")
 
         while True:
-            print(f"\n{'=' * 20} 开始新一轮数据获取 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {'=' * 20}")
+            try:
+                start_time = time.time()
+                print(f"\n{'=' * 20} 开始新一轮数据获取 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {'=' * 20}")
 
-            async with aiohttp.ClientSession() as session:
-                tasks = [fetch_api(session, url) for url in API_URLS]
-                results = await asyncio.gather(*tasks)
+                # 获取最新数据
+                async with aiohttp.ClientSession() as session:
+                    tasks = [fetch_api(session, url) for url in API_URLS]
+                    results = await asyncio.gather(*tasks)
 
-                # 检查API是否有失效情况
                 if check_api_failures(results):
-                    print(f"⚠️ 程序将暂停 {API_FAILURE_DELAY} 秒后继续运行...")
+                    print(f"⚠️ 检测到API请求失败，跳过此轮数据处理")
                     await asyncio.sleep(API_FAILURE_DELAY)
-                    continue  # 跳过本次循环，直接进入下一轮数据获取
+                    continue
 
                 all_matches_data = await process_api_data(results)
 
-            if not all_matches_data:
-                print("ℹ️ 无有效数据")
-                await asyncio.sleep(FETCH_INTERVAL)
-                continue
+                if not all_matches_data:
+                    print("ℹ️ 本轮获取的比赛数据为空")
+                    await asyncio.sleep(FETCH_INTERVAL)
+                    continue
 
-            # 对比新旧数据，找出变化
-            new_matches = []  # 新增比赛
-            changed_odds = []  # 赔率变化的比赛
-            removed_matches = []  # 移除的比赛
-            detailed_changes = {}  # 详细赔率变化
+                # 数据对比与变化检测
+                new_matches = []  # 新增比赛
+                changed_matches = []  # 赔率变化的比赛
+                removed_matches = []  # 移除的比赛
+                detailed_changes = {}  # 详细赔率变化
 
-            # 检查新增或变化的比赛（使用match_name + start_time_beijing作为唯一标识）
-            for match_name, current_data in all_matches_data.items():
-                current_hash = calculate_odds_hash(current_data)
-                # 构建缓存键（包含start_time_beijing）
-                cache_key = (match_name, current_data["start_time_beijing"])
+                # 使用match_name + start_time_beijing作为唯一标识
+                current_cache_keys = {(match_name, data["start_time_beijing"]) for match_name, data in
+                                      all_matches_data.items()}
+                previous_cache_keys = set(last_matches_data.keys())
 
-                if cache_key not in last_matches_data:
-                    # 新增比赛
-                    new_matches.append(match_name)
-                    last_matches_data[cache_key] = (current_hash, current_data)
+                # 检查新增比赛
+                for cache_key in current_cache_keys - previous_cache_keys:
+                    match_name, _ = cache_key
+                    if match_name in all_matches_data:
+                        new_matches.append(match_name)
+                        current_data = all_matches_data[match_name]
+                        current_hash = calculate_odds_hash(current_data)
+                        last_matches_data[cache_key] = (current_hash, current_data)
 
-                    # 保存比赛信息到数据库
-                    match_id = save_match_info(match_name, current_data)
-                    if match_id:
-                        print(f"✅ 已保存新比赛: {match_name} (时间: {current_data['start_time_beijing']})")
-                else:
-                    last_hash, last_data = last_matches_data[cache_key]
-                    if current_hash != last_hash:
-                        # 赔率变化
-                        changed_odds.append(match_name)
+                        # 保存新比赛到数据库
+                        match_id = save_match_info(match_name, current_data)
+                        if match_id:
+                            # 提取所有赔率作为"变化"保存
+                            initial_changes = []
+                            for source in current_data.get("sources", []):
+                                source_id = source.get("source")
+                                for spread_key, spread_data in source.get("odds", {}).get("spreads", {}).items():
+                                    for side, value in spread_data.items():
+                                        initial_changes.append({
+                                            "type": "spread",
+                                            "source": source_id,
+                                            "spread": spread_key,
+                                            "side": side,
+                                            "old_value": None,
+                                            "new_value": value
+                                        })
+                                for total_key, total_data in source.get("odds", {}).get("totals", {}).items():
+                                    for side, value in total_data.items():
+                                        initial_changes.append({
+                                            "type": "total",
+                                            "source": source_id,
+                                            "total": total_key,
+                                            "side": side,
+                                            "old_value": None,
+                                            "new_value": value
+                                        })
+                            if initial_changes:
+                                save_odds_changes(match_id, match_name, initial_changes)
+                                print(f"✅ 已保存新比赛数据: {match_name} ({len(initial_changes)} 条赔率记录)")
+
+                # 检查赔率变化
+                for cache_key in current_cache_keys & previous_cache_keys:
+                    match_name, _ = cache_key
+                    current_data = all_matches_data[match_name]
+                    current_hash = calculate_odds_hash(current_data)
+                    previous_hash, previous_data = last_matches_data[cache_key]
+
+                    if current_hash != previous_hash:
+                        changed_matches.append(match_name)
                         last_matches_data[cache_key] = (current_hash, current_data)
 
                         # 计算详细变化
-                        changes = compare_odds(last_data, current_data)
+                        changes = compare_odds(previous_data, current_data)
                         if changes:
                             detailed_changes[match_name] = changes
 
-                            # 保存比赛信息和赔率变化到数据库
+                            # 保存变化到数据库
                             match_id = save_match_info(match_name, current_data)
                             if match_id:
                                 save_odds_changes(match_id, match_name, changes)
 
-            # 检查移除的比赛（基于缓存键）
-            for cache_key in list(last_matches_data.keys()):
-                match_name, _ = cache_key
-                if match_name not in [m for m in all_matches_data.keys()]:
-                    removed_matches.append(match_name)
-                    del last_matches_data[cache_key]
-                    print(f"❌ 比赛已移除: {match_name}")
+                # 检查移除的比赛
+                for cache_key in previous_cache_keys - current_cache_keys:
+                    match_name, _ = cache_key
+                    if cache_key in last_matches_data:
+                        removed_matches.append(match_name)
+                        del last_matches_data[cache_key]
 
-            # 打印变化统计
-            print("\n" + "=" * 50)
-            print(f"📊 数据变化统计")
-            print("=" * 50)
-            print(f"  - 新增比赛: {len(new_matches)}")
-            print(f"  - 赔率变化: {len(changed_odds)}")
-            print(f"  - 移除比赛: {len(removed_matches)}")
+                # 更新全局缓存
+                update_matches_cache(all_matches_data)
 
-            # 打印新增比赛
-            if new_matches:
-                print("\n📈 新增比赛:")
-                for match_name in new_matches:
-                    print(f"  - {match_name}")
-                    print(json.dumps(all_matches_data[match_name], indent=2, ensure_ascii=False))
+                # 打印变化统计
+                print("\n" + "=" * 50)
+                print(f"📊 数据变化统计")
+                print("=" * 50)
+                print(f"  - 新增比赛: {len(new_matches)}")
+                print(f"  - 赔率变化: {len(changed_matches)}")
+                print(f"  - 移除比赛: {len(removed_matches)}")
 
-            # 打印详细赔率变化
-            if detailed_changes:
-                print("\n📊 详细赔率变化:")
-                for match_name, changes in detailed_changes.items():
-                    print(f"\n  - {match_name}")
-                    for change in changes:
-                        if change["type"] == "spread":
-                            print(
-                                f"    🔹 数据源{change['source']} 让分盘 {change['spread']} - {change['side']}: {change['old_value']} → {change['new_value']}")
-                        else:
-                            print(
-                                f"    🔹 数据源{change['source']} 大小球 {change['total']} - {change['side']}: {change['old_value']} → {change['new_value']}")
+                # 打印新增比赛
+                if new_matches:
+                    print("\n📈 新增比赛:")
+                    for match_name in new_matches:
+                        print(f"  - {match_name}")
 
-            # 打印移除比赛
-            if removed_matches:
-                print("\n❌ 移除比赛:")
-                for match_name in removed_matches:
-                    print(f"  - {match_name}")
+                # 打印详细赔率变化
+                if detailed_changes:
+                    print("\n📊 详细赔率变化:")
+                    for match_name, changes in detailed_changes.items():
+                        print(f"\n  - {match_name}")
+                        for change in changes:
+                            if change["type"] == "spread":
+                                print(
+                                    f"    🔹 数据源{change['source']} 让分盘 {change['spread']} - {change['side']}: {change['old_value']} → {change['new_value']}")
+                            else:
+                                print(
+                                    f"    🔹 数据源{change['source']} 大小球 {change['total']} - {change['side']}: {change['old_value']} → {change['new_value']}")
 
-            if not new_matches and not changed_odds and not removed_matches:
-                print("\nℹ️ 无数据变化")
+                # 打印移除比赛
+                if removed_matches:
+                    print("\n❌ 移除比赛:")
+                    for match_name in removed_matches:
+                        print(f"  - {match_name}")
 
-            print(f"\n{'=' * 20} 本轮数据获取完成，等待 {FETCH_INTERVAL} 秒后再次执行 {'=' * 20}")
-            await asyncio.sleep(FETCH_INTERVAL)
+                if not new_matches and not changed_matches and not removed_matches:
+                    print("\nℹ️ 无数据变化")
+
+                # 计算处理时间和下一次获取时间
+                elapsed = time.time() - start_time
+                next_fetch_in = max(0, FETCH_INTERVAL - elapsed)
+                print(f"\n{'=' * 50}")
+                print(f"📊 本轮数据处理完成")
+                print(f"  - 处理时间: {elapsed:.2f}秒")
+                print(f"  - 下次数据获取将在 {next_fetch_in:.2f}秒后进行")
+                print(f"{'=' * 50}\n")
+
+                # 等待下一个周期
+                await asyncio.sleep(next_fetch_in)
+
+            except Exception as e:
+                print(f"❌ 周期数据获取异常: {e}")
+                # 记录完整堆栈跟踪
+                import traceback
+                traceback.print_exc()
+                # 等待一段时间再重试
+                await asyncio.sleep(FETCH_INTERVAL)
+
     except KeyboardInterrupt:
         print("\n👋 用户手动终止程序")
     finally:
-        # 释放连接池资源
+        # 资源清理
+        if 'ws_server' in locals():
+            ws_server.close()
+            await ws_server.wait_closed()
+
+        # 取消广播任务
+        if 'broadcast_task' in locals():
+            broadcast_task.cancel()
+            await broadcast_task
+
+        # 关闭数据库连接池
         if postgres_pool:
             postgres_pool.closeall()
             print("✅ 数据库连接池已关闭")
+
+        print("👋 程序已退出")
 
 
 if __name__ == "__main__":
