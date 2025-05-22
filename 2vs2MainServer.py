@@ -1,7 +1,7 @@
 import asyncio
 import aiohttp
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 import psycopg2
 from psycopg2 import pool
@@ -41,6 +41,9 @@ RETRY_DELAY = 2  # 秒
 
 # 定时任务配置
 FETCH_INTERVAL = 30  # 秒
+
+# API失效处理配置
+API_FAILURE_DELAY = 60  # 失效后暂停时间（秒）
 
 # === 全局变量 ===
 postgres_pool = None  # 数据库连接池
@@ -179,7 +182,8 @@ def init_db_tables():
             """)
 
             # 创建索引以加速查询（包含start_time_beijing）
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_matches_name_time ON matches (match_name, start_time_beijing)")
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_matches_name_time ON matches (match_name, start_time_beijing)")
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_spread_odds ON spread_odds (match_id, source, spread_value, side, recorded_at)")
             cursor.execute(
@@ -598,7 +602,7 @@ def calculate_odds_hash(match_data: Dict) -> str:
 
 # === 新增：对比两个比赛的赔率，找出具体变化 ===
 def compare_odds(old_data: Dict, new_data: Dict) -> List[Dict]:
-    """对比两个比赛的赔率，返回详细变化列表（过滤掉new_value为None的情况）"""
+    """对比两个比赛的赔率，返回详细变化列表（保留None值的比较）"""
     changes = []
 
     # 按source分组比较
@@ -619,10 +623,7 @@ def compare_odds(old_data: Dict, new_data: Dict) -> List[Dict]:
                 old_value = old_spread.get(side)
                 new_value = new_spread.get(side)
 
-                # 过滤掉new_value为None的情况
-                if new_value is None:
-                    continue
-
+                # 修改点：保留None值的比较，只要新旧值不同就记录变化
                 if old_value != new_value:
                     changes.append({
                         "type": "spread",
@@ -642,10 +643,7 @@ def compare_odds(old_data: Dict, new_data: Dict) -> List[Dict]:
                 old_value = old_total.get(side)
                 new_value = new_total.get(side)
 
-                # 过滤掉new_value为None的情况
-                if new_value is None:
-                    continue
-
+                # 修改点：保留None值的比较，只要新旧值不同就记录变化
                 if old_value != new_value:
                     changes.append({
                         "type": "total",
@@ -657,6 +655,15 @@ def compare_odds(old_data: Dict, new_data: Dict) -> List[Dict]:
                     })
 
     return changes
+
+# === 新增：检查API响应是否有失败 ===
+def check_api_failures(results: List[Dict[str, Any]]) -> bool:
+    """检查API请求结果中是否有失败的情况"""
+    failed_apis = [result["url"] for result in results if result["status"] == "error"]
+    if failed_apis:
+        print(f"❗ 检测到API失效: {', '.join(failed_apis)}")
+        return True
+    return False
 
 
 # === 主函数 ===
@@ -670,12 +677,96 @@ async def main():
         return
 
     try:
+        print(f"\n{'=' * 20} 程序启动，获取初始数据 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {'=' * 20}")
+
+        # 首次运行时获取数据并保存初始状态到数据库
+        async with aiohttp.ClientSession() as session:
+            tasks = [fetch_api(session, url) for url in API_URLS]
+            results = await asyncio.gather(*tasks)
+
+            # 检查API是否有失效情况
+            if check_api_failures(results):
+                print(f"⚠️ 程序将暂停 {API_FAILURE_DELAY} 秒后继续运行...")
+                await asyncio.sleep(API_FAILURE_DELAY)
+                return  # 启动时遇到API失效则退出程序，避免空数据入库
+
+            all_matches_data = await process_api_data(results)
+
+        if all_matches_data:
+            print("\n" + "=" * 50)
+            print(f"📥 初始化：保存初始比赛数据到数据库")
+            print("=" * 50)
+
+            # 遍历所有比赛并保存初始数据
+            for match_name, match_data in all_matches_data.items():
+                # 保存比赛信息到数据库
+                match_id = save_match_info(match_name, match_data)
+
+                if match_id:
+                    # 构建模拟的"变化"数据（将所有当前赔率作为"新变化"）
+                    dummy_changes = []
+
+                    # 提取所有赔率数据并转换为"变化"格式
+                    for source in match_data.get("sources", []):
+                        source_id = source.get("source")
+                        odds = source.get("odds", {})
+
+                        # 处理让分盘
+                        for spread_key, spread_data in odds.get("spreads", {}).items():
+                            for side, value in spread_data.items():
+                                dummy_changes.append({
+                                    "type": "spread",
+                                    "source": source_id,
+                                    "spread": spread_key,
+                                    "side": side,
+                                    "old_value": None,  # 初始值，无旧数据
+                                    "new_value": value
+                                })
+
+                        # 处理大小球
+                        for total_key, total_data in odds.get("totals", {}).items():
+                            for side, value in total_data.items():
+                                dummy_changes.append({
+                                    "type": "total",
+                                    "source": source_id,
+                                    "total": total_key,
+                                    "side": side,
+                                    "old_value": None,  # 初始值，无旧数据
+                                    "new_value": value
+                                })
+
+                    # 保存"变化"到数据库（实际是初始数据）
+                    if dummy_changes:
+                        save_odds_changes(match_id, match_name, dummy_changes)
+                        print(f"✅ 已保存初始数据: {match_name} ({len(dummy_changes)} 条赔率记录)")
+
+            # 计算并缓存初始数据的哈希值
+            for match_name, match_data in all_matches_data.items():
+                current_hash = calculate_odds_hash(match_data)
+                cache_key = (match_name, match_data["start_time_beijing"])
+                last_matches_data[cache_key] = (current_hash, match_data)
+
+            print(f"\n✅ 初始数据保存完成，共 {len(all_matches_data)} 场比赛")
+
+        else:
+            print("ℹ️ 初始数据为空，程序将继续运行但无数据可保存")
+
+        # 进入常规数据获取循环
+        print(f"\n{'=' * 20} 开始周期性数据获取 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {'=' * 20}")
+
         while True:
             print(f"\n{'=' * 20} 开始新一轮数据获取 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {'=' * 20}")
 
             async with aiohttp.ClientSession() as session:
                 tasks = [fetch_api(session, url) for url in API_URLS]
                 results = await asyncio.gather(*tasks)
+
+                # 检查API是否有失效情况
+                if check_api_failures(results):
+                    print(f"⚠️ 程序将暂停 {API_FAILURE_DELAY} 秒后继续运行...")
+                    await asyncio.sleep(API_FAILURE_DELAY)
+                    continue  # 跳过本次循环，直接进入下一轮数据获取
+
                 all_matches_data = await process_api_data(results)
 
             if not all_matches_data:

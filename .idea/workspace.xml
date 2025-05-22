@@ -5,6 +5,8 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="eeb0fedd-caba-4d79-8ea4-e2193d380858" name="Changes" comment="a">
+      <change beforePath="$PROJECT_DIR$/.idea/2vs2Monitor.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/2vs2Monitor.iml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/2vs2MainServer.py" beforeDir="false" afterPath="$PROJECT_DIR$/2vs2MainServer.py" afterDir="false" />
     </list>
@@ -23,29 +25,44 @@
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
+  <component name="GitHubPullRequestSearchHistory"><![CDATA[{
+  "lastFilter": {
+    "state": "OPEN",
+    "assignee": "skybainiao"
+  }
+}]]></component>
+  <component name="GithubPullRequestsUISettings"><![CDATA[{
+  "selectedUrlAndAccountId": {
+    "url": "https://github.com/skybainiao/2vs2Monitor.git",
+    "accountId": "55e7b6bc-5901-4099-9f6c-4048dcb8f6c5"
+  }
+}]]></component>
   <component name="ProjectColorInfo">{
   &quot;associatedIndex&quot;: 2
 }</component>
   <component name="ProjectId" id="2werbER6gWj9YJfatn1PsHOBgvI" />
-  <component name="ProjectLevelVcsManager" settingsEditedManually="true">
+  <component name="ProjectLevelVcsManager">
     <ConfirmationsSetting value="2" id="Add" />
   </component>
   <component name="ProjectViewState">
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent">{
-  &quot;keyToString&quot;: {
-    &quot;Python.2vs2MainServer.executor&quot;: &quot;Run&quot;,
-    &quot;Python.t1.executor&quot;: &quot;Run&quot;,
-    &quot;Python.web1.executor&quot;: &quot;Run&quot;,
-    &quot;Python.web2.executor&quot;: &quot;Run&quot;,
-    &quot;Python.web3.executor&quot;: &quot;Run&quot;,
-    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
-    &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "Python.2vs2MainServer.executor": "Run",
+    "Python.t1.executor": "Run",
+    "Python.web1.executor": "Run",
+    "Python.web2.executor": "Run",
+    "Python.web3.executor": "Run",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "git-widget-placeholder": "master",
+    "ignore.virus.scanning.warn.message": "true",
+    "settings.editor.selected.configurable": "com.jetbrains.python.configuration.PyActiveSdkModuleConfigurable"
   }
-}</component>
-  <component name="RunManager" selected="Python.web3">
+}]]></component>
+  <component name="RunManager" selected="Python.web2">
     <configuration name="2vs2MainServer" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
       <module name="2vs2Monitor" />
       <option name="ENV_FILES" value="" />
@@ -158,10 +175,10 @@
     </configuration>
     <recent_temporary>
       <list>
-        <item itemvalue="Python.web3" />
         <item itemvalue="Python.web2" />
-        <item itemvalue="Python.2vs2MainServer" />
+        <item itemvalue="Python.web3" />
         <item itemvalue="Python.web1" />
+        <item itemvalue="Python.2vs2MainServer" />
         <item itemvalue="Python.t1" />
       </list>
     </recent_temporary>
@@ -169,7 +186,7 @@
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-python-sdk-975db3bf15a3-31b6be0877a2-com.jetbrains.pycharm.community.sharedIndexes.bundled-PC-241.18034.82" />
+        <option value="bundled-python-sdk-dfff61a61320-9cdd278e9d02-com.jetbrains.pycharm.community.sharedIndexes.bundled-PC-251.25410.159" />
       </set>
     </attachedChunks>
   </component>
