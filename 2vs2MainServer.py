@@ -408,7 +408,7 @@ async def process_league(league_name: str, matches: List[Dict[str, Any]],
 # === 核心数据处理（未修改）===
 @timed
 async def process_api_data(results: List[Dict[str, Any]]):
-    """Process API data and cross-match with database data"""
+    """处理API数据并生成最终比赛数据（使用唯一键：match_name + start_time_beijing）"""
     all_api_data = {}
     all_api_indexes = {}
 
@@ -448,103 +448,44 @@ async def process_api_data(results: List[Dict[str, Any]]):
     all_matched_matches = [match for league_result in league_results for match in league_result]
     total_matched = len(all_matched_matches)
 
-    # 统计信息打印
-    print("\n" + "=" * 50)
-    print(f"📊 Final Matching Statistics")
-    print("=" * 50)
-    print(f"  - Total Source3 Matches: {total_matched}")
-    print(f"  - Matches with Complete Database Bindings: {sum(len(matches) for matches in league_groups.values())}")
-    print(f"  - Successfully Matched Matches: {total_matched}")
-    print(
-        f"  - Matching Success Rate: {total_matched / total_matches_source3 * 100:.2f}% (Based on Source3 total matches)")
-    print(
-        f"  - Post-Binding Success Rate: {total_matched / (sum(len(matches) for matches in league_groups.values()) or 1) * 100:.2f}% (Based on successfully bound matches)")
-
-    # 用于存储所有比赛的数据
+    # 用于存储所有比赛的数据（使用唯一键：match_name + start_time_beijing）
     all_matches_data = {}
 
-    for match, team_mapping, matched_apis in all_matched_matches:
+    for match_tuple in all_matched_matches:
+        match, team_mapping, matched_apis = match_tuple
+
         # 提取三个数据源的赔率数据
-        source1_odds = matched_apis[1].get('odds', {'spreads': {}, 'totals': {}})
-        source2_odds = matched_apis[2].get('odds', {'spreads': {}, 'totals': {}})
-        source3_odds = matched_apis[3].get('odds', {'spreads': {}, 'totals': {}})
+        source1_odds = matched_apis.get(1, {}).get('odds', {'spreads': {}, 'totals': {}})
+        source2_odds = matched_apis.get(2, {}).get('odds', {'spreads': {}, 'totals': {}})
+        source3_odds = matched_apis.get(3, {}).get('odds', {'spreads': {}, 'totals': {}})
 
-        # ---------------------- 1. 计算盘口数值交集 ----------------------
-        common_spreads = set(source1_odds['spreads'].keys()) & \
-                         set(source2_odds['spreads'].keys()) & \
-                         set(source3_odds['spreads'].keys())
-
-        common_totals = set(source1_odds['totals'].keys()) & \
-                        set(source2_odds['totals'].keys()) & \
-                        set(source3_odds['totals'].keys())
-
-        # ---------------------- 2. 为每个盘口数值独立计算键交集 ----------------------
-        def get_spread_side_keys(odds_data, spread_key):
-            """获取单个让分盘口的键"""
-            return set(odds_data['spreads'].get(spread_key, {}).keys())
-
-        def get_total_side_keys(odds_data, total_key):
-            """获取单个大小球盘口的键"""
-            return set(odds_data['totals'].get(total_key, {}).keys())
-
-        # 构建让分盘口的键交集映射：{spread_key: common_side_keys}
-        spread_key_intersections = {}
-        for spread_key in common_spreads:
-            s1_keys = get_spread_side_keys(source1_odds, spread_key)
-            s2_keys = get_spread_side_keys(source2_odds, spread_key)
-            s3_keys = get_spread_side_keys(source3_odds, spread_key)
-            spread_key_intersections[spread_key] = s1_keys & s2_keys & s3_keys
-
-        # 构建大小球盘口的键交集映射：{total_key: common_side_keys}
-        total_key_intersections = {}
-        for total_key in common_totals:
-            s1_keys = get_total_side_keys(source1_odds, total_key)
-            s2_keys = get_total_side_keys(source2_odds, total_key)
-            s3_keys = get_total_side_keys(source3_odds, total_key)
-            total_key_intersections[total_key] = s1_keys & s2_keys & s3_keys
-
-        # ---------------------- 3. 独立过滤每个盘口的键 ----------------------
-        def filter_odds(odds_data):
-            """按盘口数值独立过滤键"""
-            filtered_spreads = {}
-            for spread_key in common_spreads:
-                # 获取该盘口的三方共有键
-                common_keys = spread_key_intersections.get(spread_key, set())
-                spread_info = odds_data['spreads'].get(spread_key, {})
-                filtered_spreads[spread_key] = {
-                    k: v for k, v in spread_info.items() if k in common_keys
-                }
-
-            filtered_totals = {}
-            for total_key in common_totals:
-                # 获取该盘口的三方共有键
-                common_keys = total_key_intersections.get(total_key, set())
-                total_info = odds_data['totals'].get(total_key, {})
-                filtered_totals[total_key] = {
-                    k: v for k, v in total_info.items() if k in common_keys
-                }
-
-            return {
-                "spreads": filtered_spreads,
-                "totals": filtered_totals
-            }
-
-        # 应用过滤
-        filtered_odds = {
-            1: filter_odds(source1_odds),
-            2: filter_odds(source2_odds),
-            3: filter_odds(source3_odds)
-        }
+        # 计算盘口交集（与原代码一致）
+        common_spreads = set(source1_odds['spreads'].keys()) & set(source2_odds['spreads'].keys()) & set(source3_odds['spreads'].keys())
+        common_totals = set(source1_odds['totals'].keys()) & set(source2_odds['totals'].keys()) & set(source3_odds['totals'].keys())
 
         # 使用数据源2的名称作为比赛名称
         match_name = f"{team_mapping['league']['source2']} - {team_mapping['home']['source2']} vs {team_mapping['away']['source2']}"
 
-        # 构建每个数据源的数据
+        # 从数据源1获取start_time_beijing（关键修改：强制校验非空）
+        source1_match_key = (team_mapping['league']['source1'], team_mapping['home']['source1'], team_mapping['away']['source1'])
+        source1_raw_match = next((m for m in all_api_data[1] if (
+            m.get('league_name') == source1_match_key[0] and
+            m.get('home_team') == source1_match_key[1] and
+            m.get('away_team') == source1_match_key[2]
+        )), None)
+
+        # 强制要求start_time_beijing非空，否则跳过（或使用默认值）
+        start_time_beijing = source1_raw_match.get('start_time_beijing', '') if source1_raw_match else ''
+        if not start_time_beijing:
+            print(f"❌ 跳过比赛 {match_name}：start_time_beijing 为空")
+            continue  # 严格模式：空时间比赛不进入缓存
+
+        time_until_start = source1_raw_match.get('time_until_start', '') if source1_raw_match else ''
+
+        # 构建数据源结构（与原代码一致）
         source_data = []
         for source_index in sorted(matched_apis.keys()):
             api_match = matched_apis[source_index]
-
-            # 处理主客队名称
             if source_index == 3:
                 home_team = api_match['home_team']
                 away_team = api_match['away_team']
@@ -555,40 +496,22 @@ async def process_api_data(results: List[Dict[str, Any]]):
                 away_team = team_mapping["away"][source_key]
                 league_name = team_mapping["league"][source_key]
 
-            # 构建单个数据源的数据
             source_entry = {
                 "source": source_index,
                 "league": league_name,
                 "home_team": home_team,
                 "away_team": away_team,
-                "odds": filtered_odds[source_index]
+                "odds": {
+                    "spreads": {k: v for k, v in api_match.get('odds', {}).get('spreads', {}).items() if k in common_spreads},
+                    "totals": {k: v for k, v in api_match.get('odds', {}).get('totals', {}).items() if k in common_totals}
+                }
             }
             source_data.append(source_entry)
 
-        # 从数据源1的原始数据中获取start_time_beijing和time_until_start
-        source1_match_key = (team_mapping['league']['source1'],
-                             team_mapping['home']['source1'],
-                             team_mapping['away']['source1'])
-
-        # 查找数据源1中对应的比赛
-        source1_raw_match = None
-        for match in all_api_data[1]:
-            if (match.get('league_name') == source1_match_key[0] and
-                    match.get('home_team') == source1_match_key[1] and
-                    match.get('away_team') == source1_match_key[2]):
-                source1_raw_match = match
-                break
-
-        # 提取所需字段（确保start_time_beijing非空）
-        start_time_beijing = source1_raw_match.get('start_time_beijing', '') if source1_raw_match else ''
-        if not start_time_beijing:
-            print(f"警告: 比赛 {match_name} 的start_time_beijing为空，可能导致数据库唯一约束失败")
-            continue  # 跳过空时间的比赛（根据需求处理）
-
-        time_until_start = source1_raw_match.get('time_until_start', '') if source1_raw_match else ''
-
-        # 将该比赛的数据添加到总数据中
-        all_matches_data[match_name] = {
+        # 使用唯一键存储比赛数据（match_name + start_time_beijing）
+        unique_key = f"{match_name}-{start_time_beijing}"
+        all_matches_data[unique_key] = {
+            "match_name": match_name,
             "league_name": team_mapping['league']['source2'],
             "home_team": team_mapping['home']['source2'],
             "away_team": team_mapping['away']['source2'],
@@ -597,6 +520,8 @@ async def process_api_data(results: List[Dict[str, Any]]):
             "sources": source_data
         }
 
+    # 打印统计信息
+    print(f"🔑 生成唯一键数量: {len(all_matches_data)}")
     return all_matches_data
 
 
@@ -686,45 +611,55 @@ def check_api_failures(results: List[Dict[str, Any]]) -> bool:
 
 # === 新增：维护全局比赛数据缓存 ===
 def update_matches_cache(matches_data: Dict):
-    """更新全局比赛数据缓存"""
+    """更新全局比赛数据缓存（使用唯一键，严格校验数据完整性）"""
     global all_matches_cache
 
-    # 先清除已不存在的比赛
-    current_matches = set(matches_data.keys())
-    old_matches = set(all_matches_cache.keys())
-    removed_matches = old_matches - current_matches
+    # 清除无效键（确保键为 match_name-start_time_beijing 格式）
+    valid_matches = {}
+    for key, data in matches_data.items():
+        # 校验键格式（可选：确保键包含分隔符）
+        if '-' not in key:
+            print(f"⚠️ 无效缓存键 {key}，格式必须为 match_name-start_time_beijing")
+            continue
+        # 校验数据完整性
+        required_fields = ["match_name", "start_time_beijing", "sources"]
+        if any(field not in data for field in required_fields):
+            print(f"⚠️ 比赛 {key} 缺少必要字段，不加入缓存")
+            continue
+        valid_matches[key] = data
 
-    for match_name in removed_matches:
-        del all_matches_cache[match_name]
+    # 添加时间戳并更新缓存
+    current_time = datetime.now().isoformat()
+    for key in valid_matches:
+        valid_matches[key]["last_updated"] = current_time
 
-    # 更新或添加比赛数据
-    for match_name, data in matches_data.items():
-        # 添加更新时间戳
-        data_with_timestamp = {
-            **data,
-            "last_updated": datetime.now().isoformat()
-        }
-        all_matches_cache[match_name] = data_with_timestamp
-
-    print(f"✅ 比赛数据缓存已更新，当前缓存大小: {len(all_matches_cache)}")
+    all_matches_cache = valid_matches
+    print(f"✅ 比赛数据缓存已更新，有效数据量: {len(all_matches_cache)}")
 
 
-# === 新增：WebSocket广播函数（修改为非阻塞）===
+# === 新增：WebSocket广播函数（修改为数据更新后调用）===
 async def broadcast_matches_data():
-    """定期广播最新比赛数据给所有连接的客户端"""
-    while True:
-        try:
-            if connected_clients and all_matches_cache:
-                data_to_send = {
-                    "timestamp": datetime.now().isoformat(),
-                    "matches": list(all_matches_cache.values())
-                }
-                await asyncio.gather(
-                    *[client.send(json.dumps(data_to_send)) for client in connected_clients]
-                )
-        except Exception as e:
-            print(f"❌ WebSocket广播失败: {e}")
-        await asyncio.sleep(5)  # 每5秒广播一次
+    """广播完整比赛数据（直接推送缓存中的值列表）"""
+    try:
+        if connected_clients and all_matches_cache:
+            # 转换为列表时保留完整数据（键已包含在数据中）
+            matches_list = list(all_matches_cache.values())
+
+            # 检查数据格式（确保包含前端所需字段）
+            if any("start_time_beijing" not in m for m in matches_list):
+                print("⚠️ 检测到不完整比赛数据，跳过本次广播")
+                return
+
+            data_to_send = {
+                "timestamp": datetime.now().isoformat(),
+                "matches": matches_list
+            }
+            await asyncio.gather(
+                *[client.send(json.dumps(data_to_send, default=str)) for client in connected_clients]
+            )
+            print(f"📢 广播 {len(matches_list)} 场比赛数据")
+    except Exception as e:
+        print(f"❌ WebSocket广播失败: {e}")
 
 
 async def ws_handler(websocket, path):
@@ -732,7 +667,7 @@ async def ws_handler(websocket, path):
     # 添加客户端到连接集合
     connected_clients.add(websocket)
     print(f"✅ 新的WebSocket连接，当前连接数: {len(connected_clients)}")
-
+    await broadcast_matches_data()
     try:
         # 保持连接打开
         await websocket.wait_closed()
@@ -811,8 +746,8 @@ async def main():
 
             update_matches_cache(all_matches_data)
 
-            # 将广播函数作为独立任务运行，不阻塞主循环
-            broadcast_task = asyncio.create_task(broadcast_matches_data())
+            # 初始数据加载后立即广播
+            await broadcast_matches_data()
 
             print(f"\n✅ 初始数据保存完成，共 {len(all_matches_data)} 场比赛")
         else:
@@ -925,6 +860,9 @@ async def main():
                 # 更新全局缓存
                 update_matches_cache(all_matches_data)
 
+                # 数据更新完成后立即广播
+                await broadcast_matches_data()
+
                 # 打印变化统计
                 print("\n" + "=" * 50)
                 print(f"📊 数据变化统计")
@@ -988,11 +926,6 @@ async def main():
         if 'ws_server' in locals():
             ws_server.close()
             await ws_server.wait_closed()
-
-        # 取消广播任务
-        if 'broadcast_task' in locals():
-            broadcast_task.cancel()
-            await broadcast_task
 
         # 关闭数据库连接池
         if postgres_pool:
