@@ -4,16 +4,17 @@ import json
 from datetime import datetime, timezone, timedelta
 from dateutil.parser import parse
 from flask import Flask, jsonify, request
+from concurrent.futures import ThreadPoolExecutor  # 新增多线程库
 
 app = Flask(__name__)
 
 # 配置信息
-USERNAME = "GA1A713S00"
-PASSWORD = "dddd1111DD"
+USERNAME = "H620803004"
+PASSWORD = "dddd1111"
 SPORT_ID = 29  # 足球运动 ID
-FIXTURES_API_URL = "https://api.ps3838.com/v3/fixtures"  # 赛事列表 API
-ODDS_API_URL = "https://api.ps3838.com/v3/odds"  # 赔率 API
-ODDS_FORMAT = "Decimal"  # 赔率格式（支持 American/Decimal/HongKong/Indonesian/Malay）
+FIXTURES_API_URL = "https://api.ps3838.com/v3/fixtures"  # 修复URL末尾空格
+ODDS_API_URL = "https://api.ps3838.com/v3/odds"  # 修复URL末尾空格
+ODDS_FORMAT = "Malay"  # 赔率格式（支持 American/Decimal/HongKong/Indonesian/Malay）
 JAVA_CHECK_API = "http://160.25.20.18:8080/api/bindings/check-existing"  # Java API地址
 
 # 生成 Basic 认证头
@@ -41,28 +42,21 @@ def get_fixtures():
     return None
 
 
-# ------------------------------ 获取赛事赔率 ------------------------------
+# ------------------------------ 获取赛事赔率（保持单例接口，供多线程调用）------------------------------
 def get_odds(event_ids):
     params = {
         "sportId": SPORT_ID,
         "oddsFormat": ODDS_FORMAT,
-        "eventIds": event_ids  # 按文档支持的逗号分隔格式传递
+        "eventIds": event_ids  # 接受逗号分隔字符串
     }
-    headers = {
-        "Authorization": f"Basic {auth_header}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Basic {auth_header}"}  # 移除错误的Content-Type头
     try:
-        response = requests.get(ODDS_API_URL, params=params, headers=headers)
+        response = requests.get(ODDS_API_URL, params=params, headers=headers, timeout=(5, 10))
         response.raise_for_status()
         return response.json()
-    except requests.exceptions.HTTPError as e:
-        error_data = response.json()
-        print(
-            f"获取赔率失败 - HTTP 错误 {response.status_code}: {error_data.get('error', {}).get('message', '未知错误')}")
-    except requests.exceptions.RequestException as e:
-        print(f"获取赔率请求失败: {e}")
-    return None
+    except Exception as e:
+        print(f"获取赔率失败: {e}")
+        return None
 
 
 # 格式化时间差
@@ -117,7 +111,7 @@ def check_matches_in_db(matches):
 
 def reformat_odds_data(original_odds):
     """
-    将赔率数据从原格式转换为指定的新格式
+    将赔率数据从原格式转换为指定的新格式，添加altLineId支持
     :param original_odds: 原始赔率数据
     :return: 重新格式化后的赔率数据
     """
@@ -135,13 +129,14 @@ def reformat_odds_data(original_odds):
             hc = int(hc)
         return str(hc)
 
-    # 处理让球盘数据（原逻辑基础上使用新格式化函数）
+    # 处理让球盘数据（添加altLineId）
     if "spreads" in original_odds:
         for spread in original_odds["spreads"]:
             home_handicap = spread.get("home_handicap")
             away_handicap = spread.get("away_handicap")
             home_odds = spread.get("home_odds")
             away_odds = spread.get("away_odds")
+            alt_line_id = spread.get("altLineId")  # 提取altLineId
 
             if home_handicap is not None:
                 home_key = format_handicap(home_handicap)
@@ -149,6 +144,9 @@ def reformat_odds_data(original_odds):
                     reformatted_odds["spreads"][home_key] = {}
                 if home_odds is not None:
                     reformatted_odds["spreads"][home_key]["home"] = str(home_odds)
+                # 添加altLineId到该盘口
+                if alt_line_id is not None:
+                    reformatted_odds["spreads"][home_key]["altLineId"] = alt_line_id
 
             if away_handicap is not None:
                 away_key = format_handicap(away_handicap)
@@ -156,13 +154,17 @@ def reformat_odds_data(original_odds):
                     reformatted_odds["spreads"][away_key] = {}
                 if away_odds is not None:
                     reformatted_odds["spreads"][away_key]["away"] = str(away_odds)
+                # 添加altLineId到该盘口
+                if alt_line_id is not None:
+                    reformatted_odds["spreads"][away_key]["altLineId"] = alt_line_id
 
-    # 处理大小球数据（新增大小球点数去尾零逻辑）
+    # 处理大小球数据（添加altLineId）
     if "totals" in original_odds:
         for total in original_odds["totals"]:
             points = total.get("points")
             over_odds = total.get("over_odds")
             under_odds = total.get("under_odds")
+            alt_line_id = total.get("altLineId")  # 提取altLineId
 
             if points is not None:
                 # 对大小球点数应用相同的格式化逻辑
@@ -172,6 +174,9 @@ def reformat_odds_data(original_odds):
                     reformatted_odds["totals"][points_formatted]["over"] = str(over_odds)
                 if under_odds is not None:
                     reformatted_odds["totals"][points_formatted]["under"] = str(under_odds)
+                # 添加altLineId到该盘口
+                if alt_line_id is not None:
+                    reformatted_odds["totals"][points_formatted]["altLineId"] = alt_line_id
 
     return reformatted_odds
 
@@ -184,9 +189,6 @@ def get_sports_data():
     if not fixtures_data:
         return jsonify({"message": "未获取到赛事列表"}), 500
 
-    current_time_utc = datetime.now(timezone.utc)
-    today_start_utc = current_time_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-    today_end_utc = current_time_utc.replace(hour=23, minute=59, second=59, microsecond=999999)
     beijing_timezone = timezone(timedelta(hours=8))
     current_time_beijing = datetime.now(beijing_timezone)
     valid_fixtures = []
@@ -201,22 +203,21 @@ def get_sports_data():
             if not starts_str:
                 continue
             starts_utc = parse(starts_str).astimezone(timezone.utc)
+            starts_beijing = starts_utc.astimezone(beijing_timezone)  # 转换为北京时间
             status = event.get("status", "")
             live_status = event.get("liveStatus", 0)
             home = event.get("home", "")
             away = event.get("away", "")
             league_name = league.get("name", "")
 
-            # 筛选条件（保留event_id用于过程逻辑）
+            # 移除原有时间过滤条件，仅保留非数据相关过滤
             if ("Corners" not in league_name and "Bookings" not in league_name and
                     "Corners" not in home and "Bookings" not in home and
                     "Corners" not in away and "Bookings" not in away and
-                    today_start_utc <= starts_utc <= today_end_utc and
-                    starts_utc > current_time_utc and
                     status == 'O' and live_status in {2}):
                 valid_fixtures.append({
-                    "event_id": event.get("id"),  # 保留event_id用于后续逻辑
-                    "start_time_beijing": starts_utc.astimezone(beijing_timezone).strftime("%Y-%m-%d %H:%M:%S"),
+                    "event_id": event.get("id"),
+                    "start_time_beijing": starts_beijing.strftime("%Y-%m-%d %H:%M:%S"),
                     "home_team": home,
                     "away_team": away,
                     "league_name": league_name
@@ -231,46 +232,74 @@ def get_sports_data():
     if not valid_fixtures:
         return jsonify({"message": "未找到符合条件的赛事"}), 404
 
-    # 2. 检查比赛是否存在于数据库（保留event_id逻辑）
+    # 2. 检查比赛是否存在于数据库
     existing_matches = check_matches_in_db(matches_to_check)
 
     if not existing_matches:
         return jsonify({"message": "未找到在数据库中存在的赛事"}), 404
 
-    # 3. 筛选出存在于数据库的赛事（保留event_id）
+    # 3. 筛选出存在于数据库的赛事
     valid_fixtures_in_db = []
     for fixture in valid_fixtures:
         for match in existing_matches:
             if (fixture["home_team"] == match["homeTeam"] and
                     fixture["away_team"] == match["awayTeam"] and
                     fixture["league_name"] == match["league"]):
-                valid_fixtures_in_db.append(fixture)  # 包含event_id
-                event_ids.append(fixture["event_id"])  # 收集event_id用于获取赔率
+                valid_fixtures_in_db.append(fixture)
+                event_ids.append(fixture["event_id"])
                 break
 
     if not valid_fixtures_in_db:
         return jsonify({"message": "未找到在数据库中存在的赛事"}), 404
 
-    # 4. 根据赛事 ID 获取赔率（必须使用event_id）
+    # 4. 根据赛事 ID 获取赔率
     if event_ids:
-        params_event_ids = ",".join(map(str, event_ids))
-        odds_data = get_odds(params_event_ids)
+        # 1. 计算批次
+        batch_size = (len(event_ids) // 5) + 1
+        batches = [event_ids[i:i + batch_size] for i in range(0, len(event_ids), batch_size)]
+        valid_batches = [batch for batch in batches if batch]  # 过滤空批次
+        if not valid_batches:
+            return jsonify({"message": "无有效赛事ID可请求赔率"}), 404
+
+        # 2. 并行请求
+        with ThreadPoolExecutor(max_workers=len(valid_batches)) as executor:
+            futures = [
+                executor.submit(get_odds, ",".join(map(str, batch)))
+                for batch in valid_batches
+            ]
+        results = [future.result() for future in futures]
+
+        # 3. 合并结果
+        odds_data = {"leagues": []}
+        for result in results:
+            if result and "leagues" in result:
+                odds_data["leagues"].extend(result["leagues"])
     else:
         odds_data = None
 
-    # 解析并打印有赔率信息的比赛结果（保留event_id用于匹配）
+    # 5. 解析赔率并过滤24小时内开赛的比赛
     valid_fixtures_with_odds = []
     for fixture in valid_fixtures_in_db:
-        event_id = fixture["event_id"]  # 使用event_id匹配赔率
+        event_id = fixture["event_id"]
         odds_info = {}
+        line_id = ""
+        league_id = None  # 新增：存储联赛ID
+        period_number = None  # 新增：存储盘口期号
 
         if odds_data:
             for league in odds_data.get("leagues", []):
+                current_league_id = league.get("id")  # 从联赛对象获取ID
                 for event in league.get("events", []):
-                    if event.get("id") == event_id:  # 通过event_id匹配
+                    if event.get("id") == event_id:
                         for period in event.get("periods", []):
+                            # 关键修改: 检查 number=0 且获取 lineId、leagueId 和 periodNumber
                             if period.get("number") == 0:
-                                # 解析让球赔率（新增尾零处理逻辑）
+                                # 获取关键字段
+                                line_id = str(period.get("lineId", ""))
+                                league_id = current_league_id  # 保存联赛ID
+                                period_number = period.get("number", 0)  # 保存盘口期号
+
+                                # 解析让球赔率 (新增altLineId提取)
                                 spreads = period.get("spreads", [])
                                 if spreads:
                                     odds_info["spreads"] = []
@@ -278,67 +307,82 @@ def get_sports_data():
                                         handicap = spread.get("hdp")
                                         home_odds = spread.get("home")
                                         away_odds = spread.get("away")
+                                        alt_line_id = spread.get("altLineId")  # 提取altLineId
 
-                                        # ---------------- 让球盘口尾零处理 ----------------
-                                        # 处理主队让球盘口（如1.0→1，-2.0→-2）
+                                        # 让球盘口尾零处理
                                         if isinstance(handicap, float) and handicap.is_integer():
                                             home_handicap = int(handicap)
                                         else:
                                             home_handicap = handicap
-                                        # 保留原有0.0转0的逻辑（自动包含在上述处理中）
                                         away_handicap = -home_handicap if home_handicap is not None else None
 
                                         spread_info = {
                                             "home_odds": home_odds,
                                             "away_odds": away_odds,
                                             "home_handicap": home_handicap,
-                                            "away_handicap": away_handicap
+                                            "away_handicap": away_handicap,
+                                            "altLineId": alt_line_id  # 添加altLineId
                                         }
                                         odds_info["spreads"].append(spread_info)
 
-                                # 解析总进球赔率（新增大小球尾零处理逻辑）
-                                totals = period.get("totals", []);
+                                # 解析总进球赔率 (新增altLineId提取)
+                                totals = period.get("totals", [])
                                 if totals:
                                     odds_info["totals"] = []
                                     for total in totals:
                                         points = total.get("points")
                                         over_odds = total.get("over")
                                         under_odds = total.get("under")
+                                        alt_line_id = total.get("altLineId")  # 提取altLineId
 
-                                        # ---------------- 大小球盘口尾零处理 ----------------
-                                        # 处理大小球点数（如2.0→2，3.0→3）
+                                        # 大小球盘口尾零处理
                                         if isinstance(points, float) and points.is_integer():
                                             points = int(points)
-                                        # 保留原有0.0转0的逻辑（自动包含在上述处理中）
 
                                         total_info = {
                                             "points": points,
                                             "over_odds": over_odds,
-                                            "under_odds": under_odds
+                                            "under_odds": under_odds,
+                                            "altLineId": alt_line_id  # 添加altLineId
                                         }
                                         odds_info["totals"].append(total_info)
+                        # 找到对应赛事后跳出内层循环
+                        break
 
         if odds_info:
             start_time_beijing = datetime.strptime(fixture["start_time_beijing"], "%Y-%m-%d %H:%M:%S")
             start_time_beijing = start_time_beijing.replace(tzinfo=beijing_timezone)
             time_until_start = start_time_beijing - current_time_beijing
-            fixture["time_until_start"] = format_time_delta(time_until_start)
-            formatted_odds_info = reformat_odds_data(odds_info)  # 调用已修改的格式化函数
-            valid_fixtures_with_odds.append((fixture, formatted_odds_info))
+
+            # 核心过滤条件：剩余时间在0到24小时内
+            if 0 < time_until_start.total_seconds() <= 24 * 3600:
+                fixture["time_until_start"] = format_time_delta(time_until_start)
+                formatted_odds_info = reformat_odds_data(odds_info)
+                valid_fixtures_with_odds.append((
+                    fixture,
+                    formatted_odds_info,
+                    line_id,
+                    league_id,          # 新增：传递联赛ID
+                    period_number       # 新增：传递盘口期号
+                ))
 
     if not valid_fixtures_with_odds:
-        return jsonify({"message": "未找到有赔率信息的符合条件赛事"}), 404
+        return jsonify({"message": "未找到24小时内有赔率信息的赛事"}), 404
 
-    # 最终输出时移除event_id字段（关键修改点）
+    # 6. 构造最终返回数据 (新增leagueId和periodNumber字段)
     data = []
-    for fixture, odds_info in valid_fixtures_with_odds:
+    for fixture, odds_info, line_id, league_id, period_number in valid_fixtures_with_odds:
         data.append({
             "league_name": fixture["league_name"],
             "home_team": fixture["home_team"],
             "away_team": fixture["away_team"],
             "start_time_beijing": fixture["start_time_beijing"],
             "time_until_start": fixture["time_until_start"],
-            "odds": odds_info
+            "odds": odds_info,
+            "event_id": fixture["event_id"],
+            "line_id": line_id,
+            "league_id": league_id,          # 新增字段
+            "period_number": period_number   # 新增字段
         })
 
     return jsonify(data)
